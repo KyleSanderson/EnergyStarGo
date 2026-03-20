@@ -20,14 +20,22 @@ type eventlogHook struct {
 
 // Run implements zerolog.Hook. It is called for every log entry.
 func (h *eventlogHook) Run(_ *zerolog.Event, level zerolog.Level, message string) {
-	const eventID uint32 = 1
+	// EventCreate message catalog maps Event IDs to Windows system error codes
+	// for low values (1 => ERROR_INVALID_FUNCTION). Use dedicated non-zero
+	// high IDs to avoid misleading default text and rely on insertion string.
+	const (
+		eventIDInfo  uint32 = 1000
+		eventIDWarn  uint32 = 1001
+		eventIDError uint32 = 1002
+	)
+
 	switch level {
 	case zerolog.ErrorLevel, zerolog.FatalLevel, zerolog.PanicLevel:
-		_ = h.el.Error(eventID, message)
+		_ = h.el.Error(eventIDError, message)
 	case zerolog.WarnLevel:
-		_ = h.el.Warning(eventID, message)
+		_ = h.el.Warning(eventIDWarn, message)
 	default:
-		_ = h.el.Info(eventID, message)
+		_ = h.el.Info(eventIDInfo, message)
 	}
 }
 

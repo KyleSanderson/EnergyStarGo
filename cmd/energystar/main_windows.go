@@ -966,6 +966,18 @@ func cmdBypassList() {
 func runAsService() {
 	cfg := loadConfigForService()
 
+	// For service mode, event logging should be enabled by default so service
+	// events are recorded in Windows Application log.
+	cfg.EnableEventLog = true
+
+	// Ensure there is always a local log file for easier debugging when
+	// EventLog message mapping is incomplete.
+	if cfg.LogFile == "" {
+		defaultDir := filepath.Join(os.Getenv("ProgramData"), "EnergyStarGo")
+		_ = os.MkdirAll(defaultDir, 0o755)
+		cfg.LogFile = filepath.Join(defaultDir, "energystar.log")
+	}
+
 	log, err := logger.New(cfg.LogFile, cfg.LogLevel)
 	if err != nil {
 		// Can't log, just exit
