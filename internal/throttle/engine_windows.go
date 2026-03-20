@@ -328,11 +328,6 @@ func (e *Engine) ThrottleAllUserBackgroundProcesses() int {
 	if e.IsPaused() {
 		return 0
 	}
-	sessionID, err := winapi.GetCurrentProcessSessionId()
-	if err != nil {
-		e.log.Error("failed to get current session ID", "error", err)
-		return 0
-	}
 
 	snapshot, err := winapi.CreateToolhelp32Snapshot(winapi.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
@@ -353,15 +348,26 @@ func (e *Engine) ThrottleAllUserBackgroundProcesses() int {
 	e.mu.Unlock()
 
 	count := 0
+	// Determine if running as a service account (SYSTEM, LOCAL SERVICE, NETWORK SERVICE, or MSA)
+	isService := winapi.IsCurrentUserServiceAccount()
+	var currentSessionID uint32
+	if !isService {
+		var err error
+		currentSessionID, err = winapi.GetCurrentProcessSessionId()
+		if err != nil {
+			e.log.Error("failed to get current session ID", "error", err)
+			return 0
+		}
+	}
+
 	for {
 		procName := winapi.ProcessNameFromEntry(&entry)
 		pid := entry.ProcessID
 
-		// Skip the foreground process and bypassed processes
 		if pid != pendingPID && !e.cfg.ShouldBypass(procName) {
-			// Check session ID
-			procSessionID, err := winapi.ProcessIdToSessionId(pid)
-			if err == nil && procSessionID == sessionID {
+			// If not a service, only throttle processes in our session
+			if isService {
+				// Service: throttle all
 				hProcess, err := winapi.OpenProcess(
 					winapi.PROCESS_SET_INFORMATION, false, pid,
 				)
@@ -373,6 +379,23 @@ func (e *Engine) ThrottleAllUserBackgroundProcesses() int {
 						e.mu.Unlock()
 					}
 					winapi.CloseHandle(hProcess)
+				}
+			} else {
+				// User: throttle only our session
+				procSessionID, err := winapi.ProcessIdToSessionId(pid)
+				if err == nil && procSessionID == currentSessionID {
+					hProcess, err := winapi.OpenProcess(
+						winapi.PROCESS_SET_INFORMATION, false, pid,
+					)
+					if err == nil {
+						if e.toggleEfficiencyMode(hProcess, pid, true) == nil {
+							count++
+							e.mu.Lock()
+							e.throttledPIDs[pid] = procName
+							e.mu.Unlock()
+						}
+						winapi.CloseHandle(hProcess)
+					}
 				}
 			}
 		}

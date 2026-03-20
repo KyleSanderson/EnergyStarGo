@@ -275,9 +275,9 @@ func DefaultConfig() *Config {
 		RestoreOnExit:        true,
 		MinBuildNumber:       22000,
 		BoostForegroundOnly:  false,
-		GPUThrottling:        true,  // safe: sets background GPU to IDLE priority
-		ThrottleOnDisplayOff: true,  // obvious: aggressive mode when screen is off
-		RespectPowerPlan:     true,  // respect user's High Performance choice
+		GPUThrottling:        true, // safe: sets background GPU to IDLE priority
+		ThrottleOnDisplayOff: true, // obvious: aggressive mode when screen is off
+		RespectPowerPlan:     true, // respect user's High Performance choice
 		AutoProfile: AutoProfileConfig{
 			Enabled:   true,
 			OnBattery: ProfileAggressive,

@@ -13,6 +13,45 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// IsCurrentUserServiceAccount returns true if the current process is running as SYSTEM, LOCAL SERVICE, NETWORK SERVICE, or a Managed Service Account.
+func IsCurrentUserServiceAccount() bool {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return false
+	}
+	defer token.Close()
+
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return false
+	}
+	sid := user.User.Sid
+	if sid == nil {
+		return false
+	}
+	// Well-known service SIDs
+	serviceSIDs := []string{
+		"S-1-5-18", // SYSTEM
+		"S-1-5-19", // LOCAL SERVICE
+		"S-1-5-20", // NETWORK SERVICE
+	}
+	for _, sidStr := range serviceSIDs {
+		wellKnownSID, err := windows.StringToSid(sidStr)
+		if err == nil && sid.Equals(wellKnownSID) {
+			return true
+		}
+	}
+	// Managed Service Accounts: S-1-5-80-0... (prefix match)
+	msaPrefix, _ := windows.StringToSid("S-1-5-80-0")
+	if msaPrefix != nil && sid.IsValid() {
+		sidStr := sid.String()
+		if len(sidStr) >= 9 && sidStr[:8] == "S-1-5-80" {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	modkernel32 = windows.NewLazySystemDLL("kernel32.dll")
 	moduser32   = windows.NewLazySystemDLL("user32.dll")
