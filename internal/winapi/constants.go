@@ -62,4 +62,16 @@ const (
 // Toolhelp32 snapshot flags
 const (
 	TH32CS_SNAPPROCESS = 0x00000002
+	TH32CS_SNAPTHREAD  = 0x00000004
+)
+
+// Thread access rights
+const (
+	THREAD_SET_INFORMATION  = 0x0020
+	THREAD_QUERY_INFORMATION = 0x0040
+)
+
+// THREAD_INFORMATION_CLASS enum
+const (
+	ThreadPowerThrottling = 1
 )

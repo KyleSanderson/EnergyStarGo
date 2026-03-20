@@ -1,0 +1,98 @@
+version: 2
+
+project_name: energystar
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: energystar-windows
+    main: ./cmd/energystar/
+    binary: energystar
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - "386"
+    goamd64:
+      - v1
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.BuildTime={{.Date}}
+      - -X main.GitCommit={{.ShortCommit}}
+
+archives:
+  - id: default
+    builds:
+      - energystar-windows
+    format: zip
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+  groups:
+    - title: "New Features"
+      regexp: '^.*?(feat|feature)(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "Improvements"
+      regexp: '^.*?(refactor|perf|improve|chore)(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: KyleSanderson
+    name: EnergyStarGo
+  name_template: "v{{.Version}}"
+  header: |
+    ## EnergyStarGo {{.Version}}
+
+    EcoQoS process throttler for Windows 11 — automatically saves battery life.
+
+    ### Downloads
+
+    | Architecture | File |
+    |---|---|
+    | Windows x64 (amd64) | `energystar_{{.Version}}_windows_x86_64.zip` |
+    | Windows ARM64 | `energystar_{{.Version}}_windows_arm64.zip` |
+    | Windows x86 (32-bit) | `energystar_{{.Version}}_windows_i386.zip` |
+
+  footer: |
+    **Full Changelog**: https://github.com/KyleSanderson/EnergyStarGo/compare/{{.PreviousTag}}...{{.Tag}}
+  prerelease: auto
+  draft: false

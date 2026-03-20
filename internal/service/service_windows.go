@@ -216,6 +216,22 @@ func Start() error {
 	return s.Start()
 }
 
+// Stop stops the running service.
+func Stop() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("failed to connect to service manager: %w", err)
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(ServiceName)
+	if err != nil {
+		return fmt.Errorf("service %s is not installed: %w", ServiceName, err)
+	}
+	defer s.Close()
+	_, err = s.Control(svc.Stop)
+	return err
+}
+
 // QueryStatus returns the current status of the EnergyStarGo service.
 func QueryStatus() (svc.Status, error) {
 	m, err := mgr.Connect()

@@ -22,13 +22,20 @@ import (
 
 // Menu item IDs
 const (
-	idStatus    = 1001
-	idStats     = 1002
-	idSeparator = 1003
-	idPause     = 1004
-	idResume    = 1005
-	idRestore   = 1006
-	idExit      = 1007
+	idStatus         = 1001
+	idStats          = 1002
+	idSeparator      = 1003
+	idPause          = 1004
+	idResume         = 1005
+	idRestore        = 1006
+	idExit           = 1007
+	idSvcSeparator   = 1008
+	idInstallSvc     = 1009
+	idUninstallSvc   = 1010
+	idStartSvc       = 1011
+	idStopSvc        = 1012
+	idAutoStartSep   = 1013
+	idToggleAutoStart = 1014
 )
 
 // Win32 constants for tray
@@ -69,6 +76,7 @@ const (
 	MF_STRING    = 0x00000000
 	MF_SEPARATOR = 0x00000800
 	MF_GRAYED    = 0x00000001
+	MF_CHECKED   = 0x00000008
 )
 
 var (
@@ -288,6 +296,18 @@ type TrayCallbacks struct {
 	OnExit    func()
 	GetStats  func() string
 	IsPaused  func() bool
+	// Service management callbacks — each should auto-elevate if not admin
+	OnInstallService   func()
+	OnUninstallService func()
+	OnStartService     func()
+	OnStopService      func()
+	// Returns current service state string: "Running", "Stopped", "Not installed", etc.
+	GetServiceStatus   func() string
+	// Auto-start at Windows login toggle
+	OnToggleAutoStart  func()
+	IsAutoStartEnabled func() bool
+	// Battery status for tray tooltip display
+	GetBatteryStatus func() string // returns e.g. "Battery: 87% (AC)" or "Battery: 45% ⚡"
 }
 
 // Tray manages the system tray icon.
@@ -516,6 +536,47 @@ func showContextMenu(t *Tray, hwnd uintptr) {
 	}
 
 	appendMenu(hMenu, MF_STRING, idRestore, "Restore All Processes")
+
+	// Service management section
+	appendMenu(hMenu, MF_SEPARATOR, idSvcSeparator, "")
+
+	svcStatus := ""
+	if t.callbacks.GetServiceStatus != nil {
+		svcStatus = t.callbacks.GetServiceStatus()
+	}
+
+	installFlags := uint32(MF_STRING)
+	if svcStatus == "Running" || svcStatus == "Stopped" {
+		installFlags |= MF_GRAYED
+	}
+	appendMenu(hMenu, installFlags, idInstallSvc, "Install Service")
+
+	startFlags := uint32(MF_STRING)
+	if svcStatus == "Running" || svcStatus == "Not installed" {
+		startFlags |= MF_GRAYED
+	}
+	appendMenu(hMenu, startFlags, idStartSvc, "Start Service")
+
+	stopFlags := uint32(MF_STRING)
+	if svcStatus == "Stopped" || svcStatus == "Not installed" {
+		stopFlags |= MF_GRAYED
+	}
+	appendMenu(hMenu, stopFlags, idStopSvc, "Stop Service")
+
+	uninstallFlags := uint32(MF_STRING)
+	if svcStatus == "Not installed" || svcStatus == "" {
+		uninstallFlags |= MF_GRAYED
+	}
+	appendMenu(hMenu, uninstallFlags, idUninstallSvc, "Uninstall Service")
+
+	appendMenu(hMenu, MF_SEPARATOR, idAutoStartSep, "")
+
+	autoStartText := "Run at startup"
+	if t.callbacks.IsAutoStartEnabled != nil && t.callbacks.IsAutoStartEnabled() {
+		autoStartText = "\u2713 Run at startup"
+	}
+	appendMenu(hMenu, MF_STRING, idToggleAutoStart, autoStartText)
+
 	appendMenu(hMenu, MF_SEPARATOR, idSeparator, "")
 	appendMenu(hMenu, MF_STRING, idExit, "Exit")
 
@@ -555,6 +616,26 @@ func handleMenuCommand(t *Tray, id uint32) {
 		if t.callbacks.OnRestore != nil {
 			go t.runCallback("OnRestore", t.callbacks.OnRestore)
 		}
+	case idInstallSvc:
+		if t.callbacks.OnInstallService != nil {
+			go t.runCallback("OnInstallService", t.callbacks.OnInstallService)
+		}
+	case idUninstallSvc:
+		if t.callbacks.OnUninstallService != nil {
+			go t.runCallback("OnUninstallService", t.callbacks.OnUninstallService)
+		}
+	case idStartSvc:
+		if t.callbacks.OnStartService != nil {
+			go t.runCallback("OnStartService", t.callbacks.OnStartService)
+		}
+	case idStopSvc:
+		if t.callbacks.OnStopService != nil {
+			go t.runCallback("OnStopService", t.callbacks.OnStopService)
+		}
+	case idToggleAutoStart:
+		if t.callbacks.OnToggleAutoStart != nil {
+			go t.runCallback("OnToggleAutoStart", t.callbacks.OnToggleAutoStart)
+		}
 	case idExit:
 		if t.callbacks.OnExit != nil {
 			go t.runCallback("OnExit", t.callbacks.OnExit)
@@ -581,6 +662,15 @@ func (t *Tray) runCallback(name string, fn func()) {
 	case <-ctx.Done():
 		t.log.Error("tray callback timed out", "callback", name, "timeout", callbackTimeout.String())
 	}
+}
+
+// UpdateStatus updates the tray tooltip with current engine + battery status.
+func (t *Tray) UpdateStatus(engineStatus string, batteryStatus string) {
+	tooltip := "EnergyStarGo - " + engineStatus
+	if batteryStatus != "" {
+		tooltip += " | " + batteryStatus
+	}
+	t.UpdateTooltip(tooltip)
 }
 
 func appendMenu(hMenu uintptr, flags uint32, id uint32, text string) {

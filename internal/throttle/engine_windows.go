@@ -117,7 +117,7 @@ func (e *Engine) IsPaused() bool {
 }
 
 // toggleEfficiencyMode enables or disables EcoQoS for a process handle.
-func (e *Engine) toggleEfficiencyMode(hProcess windows.Handle, enable bool) error {
+func (e *Engine) toggleEfficiencyMode(hProcess windows.Handle, processID uint32, enable bool) error {
 	var stateMask uint32
 	if enable {
 		stateMask = winapi.PROCESS_POWER_THROTTLING_EXECUTION_SPEED
@@ -146,7 +146,13 @@ func (e *Engine) toggleEfficiencyMode(hProcess windows.Handle, enable bool) erro
 		priorityClass = winapi.NORMAL_PRIORITY_CLASS
 	}
 
-	return winapi.SetPriorityClass(hProcess, priorityClass)
+	if err := winapi.SetPriorityClass(hProcess, priorityClass); err != nil {
+		return err
+	}
+
+	// Best-effort: throttle individual threads too (improves EcoQoS effectiveness on multi-threaded apps)
+	e.throttleProcessThreads(processID, enable)
+	return nil
 }
 
 // getProcessName returns the executable name for a process handle.
@@ -198,7 +204,7 @@ func (e *Engine) HandleForegroundEvent(hwnd uintptr) {
 
 	if !bypass {
 		// Boost the foreground process
-		if err := e.toggleEfficiencyMode(hProcess, false); err == nil {
+		if err := e.toggleEfficiencyMode(hProcess, procID, false); err == nil {
 			e.log.Boost(appName, procID)
 			e.stats.IncrementBoosted()
 		}
@@ -214,7 +220,7 @@ func (e *Engine) HandleForegroundEvent(hwnd uintptr) {
 			winapi.PROCESS_SET_INFORMATION, false, e.pendingPID,
 		)
 		if err == nil {
-			if err := e.toggleEfficiencyMode(prevHandle, true); err == nil {
+				if err := e.toggleEfficiencyMode(prevHandle, e.pendingPID, true); err == nil {
 				e.log.Throttle(e.pendingName, e.pendingPID)
 				e.stats.IncrementThrottled()
 				e.throttledPIDs[e.pendingPID] = e.pendingName
@@ -325,7 +331,7 @@ func (e *Engine) ThrottleAllUserBackgroundProcesses() int {
 					winapi.PROCESS_SET_INFORMATION, false, pid,
 				)
 				if err == nil {
-					if e.toggleEfficiencyMode(hProcess, true) == nil {
+					if e.toggleEfficiencyMode(hProcess, pid, true) == nil {
 						count++
 						e.mu.Lock()
 						e.throttledPIDs[pid] = procName
@@ -364,7 +370,7 @@ func (e *Engine) RestoreAllProcesses() int {
 		if err != nil {
 			continue
 		}
-		if e.toggleEfficiencyMode(hProcess, false) == nil {
+		if e.toggleEfficiencyMode(hProcess, pid, false) == nil {
 			e.log.Boost(name, pid)
 			count++
 		}
@@ -463,4 +469,50 @@ func (e *Engine) ThrottledProcesses() map[uint32]string {
 		result[k] = v
 	}
 	return result
+}
+
+// throttleProcessThreads applies EcoQoS-style speed throttling to all threads
+// of the given process. Errors are ignored (best-effort; some system threads reject it).
+func (e *Engine) throttleProcessThreads(processID uint32, enable bool) {
+	// TH32CS_SNAPTHREAD with processID=0 gives ALL threads across the system
+	snapshot, err := winapi.CreateToolhelp32Snapshot(winapi.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return
+	}
+	defer winapi.CloseHandle(snapshot)
+
+	var entry winapi.THREADENTRY32
+	if err := winapi.Thread32First(snapshot, &entry); err != nil {
+		return
+	}
+
+	var stateMask uint32
+	if enable {
+		stateMask = winapi.PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+	}
+	state := winapi.PROCESS_POWER_THROTTLING_STATE{
+		Version:     winapi.PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+		ControlMask: winapi.PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+		StateMask:   stateMask,
+	}
+
+	for {
+		if entry.OwnerProcessID == processID {
+			hThread, err := winapi.OpenThread(
+				winapi.THREAD_SET_INFORMATION, false, entry.ThreadID,
+			)
+			if err == nil {
+				_ = winapi.SetThreadInformation(
+					hThread,
+					winapi.ThreadPowerThrottling,
+					unsafe.Pointer(&state),
+					uint32(unsafe.Sizeof(state)),
+				)
+				winapi.CloseHandle(hThread)
+			}
+		}
+		if err := winapi.Thread32Next(snapshot, &entry); err != nil {
+			break
+		}
+	}
 }

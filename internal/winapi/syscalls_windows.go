@@ -21,6 +21,10 @@ var (
 	procProcess32FirstW          = modkernel32.NewProc("Process32FirstW")
 	procProcess32NextW           = modkernel32.NewProc("Process32NextW")
 	procProcessIdToSessionId     = modkernel32.NewProc("ProcessIdToSessionId")
+	procThread32First            = modkernel32.NewProc("Thread32First")
+	procThread32Next             = modkernel32.NewProc("Thread32Next")
+	procSetThreadInformation     = modkernel32.NewProc("SetThreadInformation")
+	procOpenThread               = modkernel32.NewProc("OpenThread")
 
 	procSetWinEventHook     = moduser32.NewProc("SetWinEventHook")
 	procUnhookWinEvent      = moduser32.NewProc("UnhookWinEvent")
@@ -225,4 +229,61 @@ func GetCurrentProcessSessionId() (uint32, error) {
 // ProcessNameFromEntry extracts the process name string from a PROCESSENTRY32W.
 func ProcessNameFromEntry(entry *PROCESSENTRY32W) string {
 	return syscall.UTF16ToString(entry.ExeFile[:])
+}
+
+// Thread32First retrieves info about the first thread in a snapshot.
+func Thread32First(snapshot windows.Handle, entry *THREADENTRY32) error {
+	entry.Size = uint32(unsafe.Sizeof(*entry))
+	ret, _, err := procThread32First.Call(
+		uintptr(snapshot),
+		uintptr(unsafe.Pointer(entry)),
+	)
+	if ret == 0 {
+		return err
+	}
+	return nil
+}
+
+// Thread32Next retrieves info about the next thread in a snapshot.
+func Thread32Next(snapshot windows.Handle, entry *THREADENTRY32) error {
+	entry.Size = uint32(unsafe.Sizeof(*entry))
+	ret, _, err := procThread32Next.Call(
+		uintptr(snapshot),
+		uintptr(unsafe.Pointer(entry)),
+	)
+	if ret == 0 {
+		return err
+	}
+	return nil
+}
+
+// OpenThread opens an existing thread object.
+func OpenThread(desiredAccess uint32, inheritHandle bool, threadID uint32) (windows.Handle, error) {
+	inherit := uintptr(0)
+	if inheritHandle {
+		inherit = 1
+	}
+	ret, _, err := procOpenThread.Call(
+		uintptr(desiredAccess),
+		inherit,
+		uintptr(threadID),
+	)
+	if ret == 0 {
+		return 0, err
+	}
+	return windows.Handle(ret), nil
+}
+
+// SetThreadInformation sets information for the specified thread.
+func SetThreadInformation(hThread windows.Handle, threadInformationClass int, threadInformation unsafe.Pointer, threadInformationSize uint32) error {
+	r1, _, err := procSetThreadInformation.Call(
+		uintptr(hThread),
+		uintptr(threadInformationClass),
+		uintptr(threadInformation),
+		uintptr(threadInformationSize),
+	)
+	if r1 == 0 {
+		return err
+	}
+	return nil
 }

@@ -40,3 +40,14 @@ type POINT struct {
 	X int32
 	Y int32
 }
+
+// THREADENTRY32 is used with CreateToolhelp32Snapshot/Thread32First/Thread32Next.
+type THREADENTRY32 struct {
+	Size           uint32
+	Usage          uint32
+	ThreadID       uint32
+	OwnerProcessID uint32
+	BasePri        int32
+	DeltaPri       int32
+	Flags          uint32
+}

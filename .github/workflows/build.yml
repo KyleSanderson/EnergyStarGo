@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+      - '.github/ISSUE_TEMPLATE/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+      - '.github/ISSUE_TEMPLATE/**'
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: "0"
+
+jobs:
+  # ──────────────────────────────────────────────────
+  # Cross-platform unit tests + vet (Linux runner)
+  # ──────────────────────────────────────────────────
+  test-linux:
+    name: Test — Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test (cross-platform packages)
+        run: go test -v -race -count=1 ./internal/config/ ./internal/logger/ ./internal/winapi/
+
+      - name: Vet — windows/amd64
+        run: GOOS=windows GOARCH=amd64 go vet ./...
+
+      - name: Vet — windows/arm64
+        run: GOOS=windows GOARCH=arm64 go vet ./...
+
+      - name: Vet — windows/386
+        run: GOOS=windows GOARCH=386 go vet ./...
+
+  # ──────────────────────────────────────────────────
+  # Full test suite on Windows (all three OS versions)
+  # ──────────────────────────────────────────────────
+  test-windows:
+    name: Test — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest   # Windows Server 2022
+          - windows-2022
+          - windows-2019
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test (all packages)
+        run: go test -v -count=1 ./...
+
+  # ──────────────────────────────────────────────────
+  # Cross-compilation for every supported architecture
+  # ──────────────────────────────────────────────────
+  build:
+    name: Build — windows/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64, "386"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -v -ldflags="-s -w" ./cmd/energystar/

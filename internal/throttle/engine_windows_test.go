@@ -6,6 +6,7 @@
 package throttle
 
 import (
+	"os"
 	"sync"
 	"testing"
 
@@ -226,6 +227,13 @@ func TestEngineWithCustomConfig(t *testing.T) {
 	if !engine.cfg.ShouldBypass("customapp.exe") {
 		t.Error("engine should respect custom bypass list")
 	}
+}
+
+func TestThrottleProcessThreadsDoesNotPanic(t *testing.T) {
+	engine := newTestEngine(t)
+	// Should not panic with current process ID
+	engine.throttleProcessThreads(uint32(os.Getpid()), true)
+	engine.throttleProcessThreads(uint32(os.Getpid()), false)
 }
 
 func TestHandleForegroundEventWithZeroHwnd(t *testing.T) {

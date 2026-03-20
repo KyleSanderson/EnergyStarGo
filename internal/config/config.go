@@ -25,6 +25,20 @@ const (
 	ProfileAggressive Profile = "aggressive"
 )
 
+// ScheduleEntry defines a time window with an active profile.
+type ScheduleEntry struct {
+	From    string  `json:"from"`    // 24h "HH:MM"
+	To      string  `json:"to"`      // 24h "HH:MM"
+	Profile Profile `json:"profile"`
+}
+
+// AutoProfileConfig controls automatic profile switching based on AC/battery state.
+type AutoProfileConfig struct {
+	Enabled   bool    `json:"enabled"`
+	OnBattery Profile `json:"on_battery"` // default: "aggressive"
+	OnAC      Profile `json:"on_ac"`      // default: "balanced"
+}
+
 // Config holds all application configuration.
 type Config struct {
 	// HousekeepingInterval is how often to re-scan and throttle background processes.
@@ -59,6 +73,24 @@ type Config struct {
 	// BoostForegroundOnly if true, only boosts the foreground process without
 	// throttling all background processes on startup.
 	BoostForegroundOnly bool `json:"boost_foreground_only"`
+
+	// Schedule defines time-based profile switching entries.
+	Schedule []ScheduleEntry `json:"schedule"`
+
+	// AutoProfile controls battery/AC-based automatic profile switching.
+	AutoProfile AutoProfileConfig `json:"auto_profile"`
+
+	// LowBatterySuspendPercent: suspend when battery ≤ this %. 0 = disabled.
+	LowBatterySuspendPercent int `json:"low_battery_suspend_percent"`
+
+	// IdleSuspendMinutes: suspend after this many idle minutes. 0 = disabled.
+	IdleSuspendMinutes int `json:"idle_suspend_minutes"`
+
+	// AutoStart controls whether EnergyStarGo launches at Windows startup.
+	AutoStart bool `json:"auto_start"`
+
+	// BatteryNotifications enables balloon notifications for battery events.
+	BatteryNotifications bool `json:"battery_notifications"`
 
 	// resolved bypass set (lowercase names)
 	bypassSet map[string]struct{}
@@ -222,6 +254,9 @@ func (c *Config) resolve() {
 		c.bypassSet[strings.ToLower(p)] = struct{}{}
 	}
 }
+
+// Resolve re-computes derived fields. It is the public counterpart of resolve.
+func (c *Config) Resolve() { c.resolve() }
 
 // ShouldBypass returns true if the given process name (case-insensitive) is in the bypass list.
 func (c *Config) ShouldBypass(processName string) bool {

@@ -32,11 +32,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KyleSanderson/EnergyStarGo/internal/autostart"
 	"github.com/KyleSanderson/EnergyStarGo/internal/config"
 	"github.com/KyleSanderson/EnergyStarGo/internal/logger"
+	"github.com/KyleSanderson/EnergyStarGo/internal/power"
+	"github.com/KyleSanderson/EnergyStarGo/internal/scheduler"
 	"github.com/KyleSanderson/EnergyStarGo/internal/service"
 	"github.com/KyleSanderson/EnergyStarGo/internal/throttle"
 	"github.com/KyleSanderson/EnergyStarGo/internal/tray"
+	"github.com/KyleSanderson/EnergyStarGo/internal/uac"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 )
@@ -61,6 +65,19 @@ func main() {
 	}
 
 	command := os.Args[1]
+
+	// install, uninstall, start, stop require admin privileges — auto-elevate.
+	switch command {
+	case "install", "uninstall", "start", "stop":
+		if !uac.IsElevated() {
+			if err := uac.Elevate(os.Args[1:]...); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to elevate: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0) // new elevated process is now running
+		}
+	}
+
 	switch command {
 	case "run":
 		cmdRun()
@@ -70,6 +87,8 @@ func main() {
 		cmdUninstall()
 	case "start":
 		cmdStart()
+	case "stop":
+		cmdStop()
 	case "status":
 		cmdStatus()
 	case "config":
@@ -95,6 +114,7 @@ Commands:
   install      Install as a Windows service
   uninstall    Remove the Windows service
   start        Start the installed service
+  stop         Stop the running service
   status       Query service status
   config       Generate default configuration file
   version      Print version information
@@ -193,9 +213,138 @@ func cmdRun() {
 		log.Info("boost_foreground_only mode: skipping initial sweep")
 	}
 
-	// Start housekeeping goroutine — skipped in boost_foreground_only mode.
+	// Sync auto-start registry setting with config
+	if cfg.AutoStart {
+		if enabled, err := autostart.IsEnabled(); err == nil && !enabled {
+			if err := autostart.Enable(); err != nil {
+				log.Warn("failed to enable auto-start", "error", err)
+			}
+		}
+	}
+
 	var wg sync.WaitGroup
 	stopHK := make(chan struct{})
+	var trayIcon *tray.Tray
+
+	// ── Auto-profile based on AC/battery state ──────────────────────────────
+	if cfg.AutoProfile.Enabled {
+		onBattery := cfg.AutoProfile.OnBattery
+		if onBattery == "" {
+			onBattery = config.ProfileAggressive
+		}
+		onAC := cfg.AutoProfile.OnAC
+		if onAC == "" {
+			onAC = config.ProfileBalanced
+		}
+
+		// Set initial profile based on current power state
+		if power.IsOnBattery() {
+			cfg.Profile = onBattery
+			cfg.Resolve() // re-compute bypass set
+			log.Info("auto-profile: on battery", "profile", string(onBattery))
+		} else {
+			cfg.Profile = onAC
+			cfg.Resolve()
+			log.Info("auto-profile: on AC", "profile", string(onAC))
+		}
+
+		// Poll power state every 30s and switch profile when AC/battery changes
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			wasOnBattery := power.IsOnBattery()
+			for {
+				select {
+				case <-ticker.C:
+					onBat := power.IsOnBattery()
+					if onBat != wasOnBattery {
+						wasOnBattery = onBat
+						if onBat {
+							cfg.Profile = onBattery
+							cfg.Resolve()
+							log.Info("auto-profile: switched to battery mode", "profile", string(onBattery))
+							if cfg.BatteryNotifications && trayIcon != nil {
+								trayIcon.ShowNotification("EnergyStarGo", "Switched to aggressive profile (on battery)")
+							}
+						} else {
+							cfg.Profile = onAC
+							cfg.Resolve()
+							log.Info("auto-profile: switched to AC mode", "profile", string(onAC))
+							if cfg.BatteryNotifications && trayIcon != nil {
+								trayIcon.ShowNotification("EnergyStarGo", "Switched to balanced profile (on AC)")
+							}
+						}
+					}
+				case <-stopHK:
+					return
+				}
+			}
+		}()
+	}
+
+	// ── Low-battery auto-suspend ─────────────────────────────────────────────
+	if cfg.LowBatterySuspendPercent > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					st, err := power.GetStatus()
+					if err != nil {
+						continue
+					}
+					if st.ACStatus == power.ACOnline {
+						continue // don't suspend when on AC
+					}
+					if st.BatteryPercent == 255 {
+						continue // no battery
+					}
+					if int(st.BatteryPercent) > cfg.LowBatterySuspendPercent {
+						continue // battery level is fine
+					}
+					idleMin := int(power.IdleSeconds()) / 60
+					if cfg.IdleSuspendMinutes > 0 && idleMin < cfg.IdleSuspendMinutes {
+						continue // not idle long enough
+					}
+					log.Warn("battery low, suspending system",
+						"battery_percent", st.BatteryPercent,
+						"threshold", cfg.LowBatterySuspendPercent)
+					if cfg.BatteryNotifications && trayIcon != nil {
+						trayIcon.ShowNotification("EnergyStarGo", fmt.Sprintf("Battery at %d%%, suspending...", st.BatteryPercent))
+					}
+					_ = power.Suspend(false, false)
+				case <-stopHK:
+					return
+				}
+			}
+		}()
+	}
+
+	// ── Scheduled profile switching ─────────────────────────────────────────
+	var sched *scheduler.Scheduler
+	if len(cfg.Schedule) > 0 {
+		entries := make([]scheduler.Entry, len(cfg.Schedule))
+		for i, e := range cfg.Schedule {
+			entries[i] = scheduler.Entry{From: e.From, To: e.To, Profile: e.Profile}
+		}
+		sched = scheduler.New(log, entries, func(p config.Profile) {
+			cfg.Profile = p
+			cfg.Resolve()
+			log.Info("scheduled profile switch", "profile", string(p))
+			if cfg.BatteryNotifications && trayIcon != nil {
+				trayIcon.ShowNotification("EnergyStarGo", fmt.Sprintf("Profile switched to %s (scheduled)", p))
+			}
+		})
+		sched.Start()
+		log.Info("schedule active", "entries", len(entries))
+	}
+
+	// Start housekeeping goroutine — skipped in boost_foreground_only mode.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -250,14 +399,145 @@ func cmdRun() {
 					s.TotalThrottled, s.TotalBoosted, s.HousekeepingRuns)
 			},
 			IsPaused: engine.IsPaused,
+			OnInstallService: func() {
+				if !uac.IsElevated() {
+					if err := uac.Elevate("install"); err != nil {
+						log.Error("failed to elevate for install", "error", err)
+					}
+					return
+				}
+				exe, _ := os.Executable()
+				if err := service.Install(exe, nil); err != nil {
+					log.Error("failed to install service", "error", err)
+				} else {
+					log.Info("service installed successfully")
+					if cfg.BatteryNotifications {
+						trayIcon.ShowNotification("EnergyStarGo", "Service installed successfully")
+					}
+				}
+			},
+			OnUninstallService: func() {
+				if !uac.IsElevated() {
+					if err := uac.Elevate("uninstall"); err != nil {
+						log.Error("failed to elevate for uninstall", "error", err)
+					}
+					return
+				}
+				if err := service.Uninstall(); err != nil {
+					log.Error("failed to uninstall service", "error", err)
+				} else {
+					log.Info("service uninstalled")
+				}
+			},
+			OnStartService: func() {
+				if !uac.IsElevated() {
+					if err := uac.Elevate("start"); err != nil {
+						log.Error("failed to elevate for start", "error", err)
+					}
+					return
+				}
+				if err := service.Start(); err != nil {
+					log.Error("failed to start service", "error", err)
+				} else {
+					log.Info("service started")
+				}
+			},
+			OnStopService: func() {
+				if !uac.IsElevated() {
+					if err := uac.Elevate("stop"); err != nil {
+						log.Error("failed to elevate for stop", "error", err)
+					}
+					return
+				}
+				if err := service.Stop(); err != nil {
+					log.Error("failed to stop service", "error", err)
+				} else {
+					log.Info("service stopped")
+				}
+			},
+			GetServiceStatus: func() string {
+				st, err := service.QueryStatus()
+				if err != nil {
+					return "Not installed"
+				}
+				switch st.State {
+				case svc.Running:
+					return "Running"
+				case svc.Stopped:
+					return "Stopped"
+				default:
+					return "Pending"
+				}
+			},
+			OnToggleAutoStart: func() {
+				if enabled, err := autostart.IsEnabled(); err == nil {
+					if enabled {
+						if err := autostart.Disable(); err != nil {
+							log.Error("failed to disable auto-start", "error", err)
+						} else {
+							log.Info("auto-start disabled")
+						}
+					} else {
+						if err := autostart.Enable(); err != nil {
+							log.Error("failed to enable auto-start", "error", err)
+						} else {
+							log.Info("auto-start enabled")
+						}
+					}
+				}
+			},
+			IsAutoStartEnabled: func() bool {
+				enabled, _ := autostart.IsEnabled()
+				return enabled
+			},
+			GetBatteryStatus: func() string {
+				st, err := power.GetStatus()
+				if err != nil || st.BatteryPercent == 255 {
+					return ""
+				}
+				acStr := "AC"
+				if st.ACStatus == power.ACOffline {
+					acStr = "battery"
+				}
+				return fmt.Sprintf("%d%% (%s)", st.BatteryPercent, acStr)
+			},
 		}
 
-		trayIcon := tray.New(log, callbacks)
+		trayIcon = tray.New(log, callbacks)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if err := trayIcon.Run(); err != nil {
 				log.Error("tray failed", "error", err)
+			}
+		}()
+
+		// Periodically update tooltip with battery status
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					st, err := power.GetStatus()
+					var battStr string
+					if err == nil && st.BatteryPercent != 255 {
+						acStr := "AC"
+						if st.ACStatus == power.ACOffline {
+							acStr = "battery"
+						}
+						battStr = fmt.Sprintf("%d%% (%s)", st.BatteryPercent, acStr)
+					}
+					engineStatus := "Running"
+					if engine.IsPaused() {
+						engineStatus = "Paused"
+					}
+					trayIcon.UpdateStatus(engineStatus, battStr)
+				case <-stopHK:
+					return
+				}
 			}
 		}()
 
@@ -291,6 +571,9 @@ func cmdRun() {
 		log.Info("restored processes on exit", "count", restored)
 	}
 
+	if sched != nil {
+		sched.Stop()
+	}
 	wg.Wait()
 	log.Info("EnergyStarGo stopped")
 }
@@ -338,6 +621,14 @@ func cmdStart() {
 		os.Exit(1)
 	}
 	fmt.Println("Service started.")
+}
+
+func cmdStop() {
+	if err := service.Stop(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to stop service: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Service stopped.")
 }
 
 func cmdStatus() {
