@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -96,10 +97,6 @@ type Config struct {
 	// processes via D3DKMTSetProcessSchedulingPriorityClass.
 	GPUThrottling bool `json:"gpu_throttling"`
 
-	// EnableGameMode pauses throttling while a fullscreen application is in
-	// the foreground (e.g. games, media players).
-	EnableGameMode bool `json:"enable_game_mode"`
-
 	// ThrottleOnDisplayOff switches to aggressive profile when the display
 	// turns off (lid close, screen timeout, manual lock) and restores the
 	// previous profile when it comes back on. Requires --tray mode.
@@ -136,6 +133,10 @@ type Config struct {
 	// BypassWindowTitles bypasses processes whose foreground window title
 	// contains any of these substrings (case-insensitive).
 	BypassWindowTitles []string `json:"bypass_window_titles"`
+
+	// mu protects Profile, bypassSet, and other mutable fields that are
+	// read/written from multiple goroutines (auto-profile, idle, schedule, etc.).
+	mu sync.RWMutex `json:"-"`
 
 	// resolved bypass set (lowercase names)
 	bypassSet map[string]struct{}
@@ -259,10 +260,12 @@ func bypassListForProfile(p Profile) []string {
 	return BalancedBypassProcesses
 }
 
-// DefaultConfig returns a Config with sensible defaults (Balanced profile).
+// DefaultConfig returns a Config with sensible defaults.
+// Follows the TLP "just works" philosophy: safe, automatic behavior that
+// improves battery life out of the box without user configuration.
 func DefaultConfig() *Config {
 	c := &Config{
-		HousekeepingSeconds:  300, // 5 minutes
+		HousekeepingSeconds:  120, // 2 minutes — frequent enough to catch newly-spawned processes
 		Profile:              ProfileBalanced,
 		BypassProcesses:      nil, // nil → use profile list
 		ExtraBypassProcesses: nil,
@@ -272,6 +275,14 @@ func DefaultConfig() *Config {
 		RestoreOnExit:        true,
 		MinBuildNumber:       22000,
 		BoostForegroundOnly:  false,
+		GPUThrottling:        true,  // safe: sets background GPU to IDLE priority
+		ThrottleOnDisplayOff: true,  // obvious: aggressive mode when screen is off
+		RespectPowerPlan:     true,  // respect user's High Performance choice
+		AutoProfile: AutoProfileConfig{
+			Enabled:   true,
+			OnBattery: ProfileAggressive,
+			OnAC:      ProfileBalanced,
+		},
 	}
 	c.resolve()
 	return c
@@ -281,7 +292,7 @@ func DefaultConfig() *Config {
 func DefaultAggressiveConfig() *Config {
 	c := DefaultConfig()
 	c.Profile = ProfileAggressive
-	c.HousekeepingSeconds = 120 // sweep more often so newly-spawned processes are caught quickly
+	c.HousekeepingSeconds = 60 // sweep aggressively so newly-spawned processes are caught fast
 	c.resolve()
 	return c
 }
@@ -321,19 +332,43 @@ func (c *Config) resolve() {
 	}
 }
 
-// Resolve re-computes derived fields. It is the public counterpart of resolve.
-func (c *Config) Resolve() { c.resolve() }
+// Resolve re-computes derived fields. Thread-safe.
+func (c *Config) Resolve() {
+	c.mu.Lock()
+	c.resolve()
+	c.mu.Unlock()
+}
+
+// SetProfile atomically changes the profile and re-resolves the bypass set.
+// Use this instead of setting Profile directly from goroutines.
+func (c *Config) SetProfile(p Profile) {
+	c.mu.Lock()
+	c.Profile = p
+	c.resolve()
+	c.mu.Unlock()
+}
+
+// GetProfile returns the current profile. Thread-safe.
+func (c *Config) GetProfile() Profile {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Profile
+}
 
 // ShouldBypass returns true if the given process name (case-insensitive) is in the bypass list.
 func (c *Config) ShouldBypass(processName string) bool {
+	c.mu.RLock()
 	_, ok := c.bypassSet[strings.ToLower(processName)]
+	c.mu.RUnlock()
 	return ok
 }
 
 // AddBypassProcess adds a process name to the bypass set at runtime.
 func (c *Config) AddBypassProcess(name string) {
+	c.mu.Lock()
 	c.ExtraBypassProcesses = append(c.ExtraBypassProcesses, name)
 	c.bypassSet[strings.ToLower(name)] = struct{}{}
+	c.mu.Unlock()
 }
 
 // LoadFromFile loads configuration from a JSON file, merging with defaults.
@@ -374,6 +409,8 @@ func DefaultConfigPath() string {
 
 // BypassList returns a copy of all bypass process names.
 func (c *Config) BypassList() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	result := make([]string, 0, len(c.bypassSet))
 	for k := range c.bypassSet {
 		result = append(result, k)

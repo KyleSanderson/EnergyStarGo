@@ -42,18 +42,13 @@ jobs:
         run: go test -v -race -count=1 ./internal/config/ ./internal/logger/ ./internal/winapi/ ./internal/scheduler/ ./internal/throttle/
 
       - name: Vet — windows/amd64
-        # Note: internal/tray excluded — has a known go vet false positive
-        # for uintptr→unsafe.Pointer in Win32 wndproc callback (safe per Win32 API contract).
-        run: |
-          GOOS=windows GOARCH=amd64 go vet ./cmd/... ./internal/config/ ./internal/logger/ ./internal/winapi/ ./internal/throttle/ ./internal/service/ ./internal/power/ ./internal/uac/ ./internal/autostart/ ./internal/scheduler/
+        run: GOOS=windows GOARCH=amd64 go vet ./...
 
       - name: Vet — windows/arm64
-        run: |
-          GOOS=windows GOARCH=arm64 go vet ./cmd/... ./internal/config/ ./internal/logger/ ./internal/winapi/ ./internal/throttle/ ./internal/service/ ./internal/power/ ./internal/uac/ ./internal/autostart/ ./internal/scheduler/
+        run: GOOS=windows GOARCH=arm64 go vet ./...
 
       - name: Vet — windows/386
-        run: |
-          GOOS=windows GOARCH=386 go vet ./cmd/... ./internal/config/ ./internal/logger/ ./internal/winapi/ ./internal/throttle/ ./internal/service/ ./internal/power/ ./internal/uac/ ./internal/autostart/ ./internal/scheduler/
+        run: GOOS=windows GOARCH=386 go vet ./...
 
   # ──────────────────────────────────────────────────
   # Full test suite on Windows (all three OS versions)

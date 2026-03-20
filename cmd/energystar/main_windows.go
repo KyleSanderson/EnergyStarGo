@@ -269,12 +269,10 @@ func cmdRun() {
 
 		// Set initial profile based on current power state
 		if power.IsOnBattery() {
-			cfg.Profile = onBattery
-			cfg.Resolve() // re-compute bypass set
+			cfg.SetProfile(onBattery)
 			log.Info("auto-profile: on battery", "profile", string(onBattery))
 		} else {
-			cfg.Profile = onAC
-			cfg.Resolve()
+			cfg.SetProfile(onAC)
 			log.Info("auto-profile: on AC", "profile", string(onAC))
 		}
 
@@ -292,15 +290,13 @@ func cmdRun() {
 					if onBat != wasOnBattery {
 						wasOnBattery = onBat
 						if onBat {
-							cfg.Profile = onBattery
-							cfg.Resolve()
+							cfg.SetProfile(onBattery)
 							log.Info("auto-profile: switched to battery mode", "profile", string(onBattery))
 							if cfg.BatteryNotifications && trayIcon != nil {
 								trayIcon.ShowNotification("EnergyStarGo", "Switched to aggressive profile (on battery)")
 							}
 						} else {
-							cfg.Profile = onAC
-							cfg.Resolve()
+							cfg.SetProfile(onAC)
 							log.Info("auto-profile: switched to AC mode", "profile", string(onAC))
 							if cfg.BatteryNotifications && trayIcon != nil {
 								trayIcon.ShowNotification("EnergyStarGo", "Switched to balanced profile (on AC)")
@@ -371,9 +367,8 @@ func cmdRun() {
 					idle := power.IdleSeconds() >= thresholdSec
 					if idle && !wasIdle {
 						wasIdle = true
-						savedProfile = cfg.Profile
-						cfg.Profile = config.ProfileAggressive
-						cfg.Resolve()
+						savedProfile = cfg.GetProfile()
+						cfg.SetProfile(config.ProfileAggressive)
 						log.Info("idle-throttle: user idle, switching to aggressive profile",
 							"idle_minutes", cfg.IdleAggressiveMinutes)
 						if !cfg.BoostForegroundOnly {
@@ -381,8 +376,7 @@ func cmdRun() {
 						}
 					} else if !idle && wasIdle {
 						wasIdle = false
-						cfg.Profile = savedProfile
-						cfg.Resolve()
+						cfg.SetProfile(savedProfile)
 						log.Info("idle-throttle: user active, restoring profile",
 							"profile", string(savedProfile))
 					}
@@ -478,8 +472,7 @@ func cmdRun() {
 			entries[i] = scheduler.Entry{From: e.From, To: e.To, Profile: e.Profile}
 		}
 		sched = scheduler.New(log, entries, func(p config.Profile) {
-			cfg.Profile = p
-			cfg.Resolve()
+			cfg.SetProfile(p)
 			log.Info("scheduled profile switch", "profile", string(p))
 			if cfg.BatteryNotifications && trayIcon != nil {
 				trayIcon.ShowNotification("EnergyStarGo", fmt.Sprintf("Profile switched to %s (scheduled)", p))
@@ -667,8 +660,7 @@ func cmdRun() {
 				triggerShutdown()
 			},
 			OnSetProfile: func(profile string) {
-				cfg.Profile = config.Profile(profile)
-				cfg.Resolve()
+				cfg.SetProfile(config.Profile(profile))
 				if !cfg.BoostForegroundOnly {
 					engine.ThrottleAllUserBackgroundProcesses()
 				}
@@ -676,6 +668,9 @@ func cmdRun() {
 				if trayIcon != nil {
 					trayIcon.ShowNotification("EnergyStarGo", fmt.Sprintf("Profile: %s", profile))
 				}
+			},
+			GetProfile: func() string {
+				return string(cfg.GetProfile())
 			},
 		}
 
@@ -691,17 +686,15 @@ func cmdRun() {
 
 				if !displayOn && !displayIsOff {
 					displayIsOff = true
-					savedProfile = cfg.Profile
-					cfg.Profile = config.ProfileAggressive
-					cfg.Resolve()
+					savedProfile = cfg.GetProfile()
+					cfg.SetProfile(config.ProfileAggressive)
 					log.Info("display off: switching to aggressive profile")
 					if !cfg.BoostForegroundOnly {
 						engine.ThrottleAllUserBackgroundProcesses()
 					}
 				} else if displayOn && displayIsOff {
 					displayIsOff = false
-					cfg.Profile = savedProfile
-					cfg.Resolve()
+					cfg.SetProfile(savedProfile)
 					log.Info("display on: restoring profile", "profile", string(savedProfile))
 				}
 			}

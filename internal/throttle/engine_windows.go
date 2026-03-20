@@ -83,10 +83,8 @@ type Engine struct {
 	winEventCallback uintptr
 
 	// Pause state — set via SetPaused; guards throttling operations.
-	pausedMu       sync.Mutex
-	paused         bool
-	manuallyPaused bool
-	gameModeActive bool
+	pausedMu sync.Mutex
+	paused   bool
 }
 
 // New creates a new throttle engine.
@@ -109,7 +107,6 @@ func (e *Engine) Stats() Stats {
 func (e *Engine) SetPaused(paused bool) {
 	e.pausedMu.Lock()
 	e.paused = paused
-	e.manuallyPaused = paused
 	e.pausedMu.Unlock()
 }
 
@@ -193,26 +190,6 @@ func (e *Engine) getProcessName(hProcess windows.Handle) string {
 
 // HandleForegroundEvent processes a foreground window change event.
 func (e *Engine) HandleForegroundEvent(hwnd uintptr) {
-	if e.cfg.EnableGameMode {
-		fullscreen := winapi.IsWindowFullscreen(hwnd)
-		e.pausedMu.Lock()
-		if fullscreen && !e.gameModeActive && !e.manuallyPaused {
-			e.gameModeActive = true
-			e.paused = true
-			e.pausedMu.Unlock()
-			e.log.Info("game mode: fullscreen detected, pausing throttling")
-			return
-		} else if !fullscreen && e.gameModeActive {
-			e.gameModeActive = false
-			if !e.manuallyPaused {
-				e.paused = false
-			}
-			e.pausedMu.Unlock()
-			e.log.Info("game mode: fullscreen exited, resuming throttling")
-		} else {
-			e.pausedMu.Unlock()
-		}
-	}
 	if e.IsPaused() {
 		return
 	}

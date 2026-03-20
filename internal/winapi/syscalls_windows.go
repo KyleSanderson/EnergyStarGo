@@ -29,6 +29,7 @@ var (
 	procSetThreadInformation     = modkernel32.NewProc("SetThreadInformation")
 	procOpenThread               = modkernel32.NewProc("OpenThread")
 	procSetConsoleCtrlHandler    = modkernel32.NewProc("SetConsoleCtrlHandler")
+	procRtlMoveMemory            = modkernel32.NewProc("RtlMoveMemory")
 	procGlobalMemoryStatusEx     = modkernel32.NewProc("GlobalMemoryStatusEx")
 	procGetTickCount64           = modkernel32.NewProc("GetTickCount64")
 	procSetProcessAffinityMask   = modkernel32.NewProc("SetProcessAffinityMask")
@@ -426,6 +427,14 @@ func GetActivePowerScheme() (windows.GUID, error) {
 	}
 	defer windows.LocalFree(windows.Handle(unsafe.Pointer(guidPtr)))
 	return *guidPtr, nil
+}
+
+// CopyFromUintptr copies len bytes from a kernel-provided address (uintptr)
+// into a Go-allocated buffer. Uses RtlMoveMemory so the uintptr→pointer
+// conversion happens inside the syscall layer (//go:uintptrescapes) instead
+// of Go code, avoiding the go vet "possible misuse of unsafe.Pointer" warning.
+func CopyFromUintptr(dst unsafe.Pointer, src uintptr, length uintptr) {
+	procRtlMoveMemory.Call(uintptr(dst), src, length)
 }
 
 // GUID_CONSOLE_DISPLAY_STATE is the power setting GUID that fires when the

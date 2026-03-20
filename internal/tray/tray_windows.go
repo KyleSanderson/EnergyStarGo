@@ -344,6 +344,8 @@ type TrayCallbacks struct {
 	OnDisplayStateChange func(displayOn bool)
 	// Profile preset selection from tray menu
 	OnSetProfile func(profile string)
+	// Returns the current profile name (e.g. "balanced", "aggressive")
+	GetProfile func() string
 }
 
 // Tray manages the system tray icon.
@@ -541,13 +543,13 @@ func trayWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case winapi.WM_POWERBROADCAST:
 		if wParam == winapi.PBT_POWERSETTINGCHANGE && t.callbacks.OnDisplayStateChange != nil {
-			// lParam is a kernel-provided pointer to POWERBROADCAST_SETTING,
-			// valid for the duration of this wndproc call. The uintptr→Pointer
-			// conversion triggers go vet but is correct for Win32 callbacks.
-			pbs := (*winapi.POWERBROADCAST_SETTING)(unsafe.Pointer(lParam))
+			// Copy the kernel-provided POWERBROADCAST_SETTING into Go memory
+			// via RtlMoveMemory. This avoids the uintptr→unsafe.Pointer cast
+			// that go vet flags as a false positive in Win32 callbacks.
+			var pbs winapi.POWERBROADCAST_SETTING
+			winapi.CopyFromUintptr(unsafe.Pointer(&pbs), lParam, unsafe.Sizeof(pbs))
 			if pbs.DataLength >= 1 {
-				state := pbs.Data[0]
-				t.callbacks.OnDisplayStateChange(state != winapi.DISPLAY_OFF)
+				t.callbacks.OnDisplayStateChange(pbs.Data[0] != winapi.DISPLAY_OFF)
 			}
 		}
 		return 0
@@ -639,9 +641,28 @@ func showContextMenu(t *Tray, hwnd uintptr) {
 	appendMenu(hMenu, MF_STRING, idToggleAutoStart, autoStartText)
 
 	appendMenu(hMenu, MF_SEPARATOR, idPresetsSep, "")
-	appendMenu(hMenu, MF_STRING, idPresetBattery, "Profile: Battery Saver")
-	appendMenu(hMenu, MF_STRING, idPresetBalanced, "Profile: Balanced")
-	appendMenu(hMenu, MF_STRING, idPresetPerf, "Profile: Performance")
+
+	currentProfile := ""
+	if t.callbacks.GetProfile != nil {
+		currentProfile = t.callbacks.GetProfile()
+	}
+
+	batteryLabel := "Profile: Battery Saver"
+	balancedLabel := "Profile: Balanced"
+	perfLabel := "Profile: Performance"
+
+	if currentProfile == "aggressive" {
+		batteryLabel = "\u2713 " + batteryLabel
+	} else if currentProfile == "balanced" {
+		balancedLabel = "\u2713 " + balancedLabel
+	}
+	if isPaused {
+		perfLabel = "\u2713 " + perfLabel
+	}
+
+	appendMenu(hMenu, MF_STRING, idPresetBattery, batteryLabel)
+	appendMenu(hMenu, MF_STRING, idPresetBalanced, balancedLabel)
+	appendMenu(hMenu, MF_STRING, idPresetPerf, perfLabel)
 
 	// "Restart Elevated" option — only shown when not already admin
 	isElev := false
@@ -717,15 +738,21 @@ func handleMenuCommand(t *Tray, id uint32) {
 		if t.callbacks.OnSetProfile != nil {
 			go t.callbacks.OnSetProfile("aggressive")
 		}
+		t.UpdateTooltip("EnergyStarGo - Battery Saver")
 	case idPresetBalanced:
 		if t.callbacks.OnSetProfile != nil {
 			go t.callbacks.OnSetProfile("balanced")
 		}
+		t.UpdateTooltip("EnergyStarGo - Balanced")
 	case idPresetPerf:
+		// Performance mode: stop throttling and restore all processes.
 		if t.callbacks.OnPause != nil {
 			go t.callbacks.OnPause()
-			t.UpdateTooltip("EnergyStarGo - Paused (Performance)")
 		}
+		if t.callbacks.OnRestore != nil {
+			go t.callbacks.OnRestore()
+		}
+		t.UpdateTooltip("EnergyStarGo - Performance (throttling disabled)")
 	case idExit:
 		if t.callbacks.OnExit != nil {
 			go t.callbacks.OnExit()

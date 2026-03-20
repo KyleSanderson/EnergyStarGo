@@ -4,19 +4,21 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.HousekeepingSeconds != 300 {
-		t.Errorf("expected HousekeepingSeconds=300, got %d", cfg.HousekeepingSeconds)
+	if cfg.HousekeepingSeconds != 120 {
+		t.Errorf("expected HousekeepingSeconds=120, got %d", cfg.HousekeepingSeconds)
 	}
-	if cfg.HousekeepingInterval.Seconds() != 300 {
-		t.Errorf("expected HousekeepingInterval=5m, got %v", cfg.HousekeepingInterval)
+	if cfg.HousekeepingInterval.Seconds() != 120 {
+		t.Errorf("expected HousekeepingInterval=2m, got %v", cfg.HousekeepingInterval)
 	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("expected LogLevel=info, got %s", cfg.LogLevel)
@@ -32,6 +34,25 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.EnableEventLog {
 		t.Error("expected EnableEventLog=false")
+	}
+	// Sane defaults: these should all be enabled out of the box
+	if !cfg.GPUThrottling {
+		t.Error("expected GPUThrottling=true by default")
+	}
+	if !cfg.ThrottleOnDisplayOff {
+		t.Error("expected ThrottleOnDisplayOff=true by default")
+	}
+	if !cfg.RespectPowerPlan {
+		t.Error("expected RespectPowerPlan=true by default")
+	}
+	if !cfg.AutoProfile.Enabled {
+		t.Error("expected AutoProfile.Enabled=true by default")
+	}
+	if cfg.AutoProfile.OnBattery != ProfileAggressive {
+		t.Errorf("expected AutoProfile.OnBattery=aggressive, got %s", cfg.AutoProfile.OnBattery)
+	}
+	if cfg.AutoProfile.OnAC != ProfileBalanced {
+		t.Errorf("expected AutoProfile.OnAC=balanced, got %s", cfg.AutoProfile.OnAC)
 	}
 }
 
@@ -323,5 +344,70 @@ func TestConfigSaveLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.HousekeepingSeconds != original.HousekeepingSeconds {
 		t.Errorf("HousekeepingSeconds mismatch: %d vs %d", loaded.HousekeepingSeconds, original.HousekeepingSeconds)
+	}
+}
+
+func TestSetProfileConcurrent(t *testing.T) {
+	cfg := DefaultConfig()
+	var wg sync.WaitGroup
+
+	// Hammer SetProfile and ShouldBypass from many goroutines
+	for i := 0; i < 100; i++ {
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			cfg.SetProfile(ProfileAggressive)
+		}()
+		go func() {
+			defer wg.Done()
+			cfg.SetProfile(ProfileBalanced)
+		}()
+		go func() {
+			defer wg.Done()
+			cfg.ShouldBypass("dwm.exe")
+		}()
+	}
+	wg.Wait()
+
+	// After all goroutines, profile should be one of the two
+	p := cfg.GetProfile()
+	if p != ProfileBalanced && p != ProfileAggressive {
+		t.Errorf("unexpected profile: %s", p)
+	}
+}
+
+func TestGetProfile(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.GetProfile() != ProfileBalanced {
+		t.Errorf("expected balanced, got %s", cfg.GetProfile())
+	}
+	cfg.SetProfile(ProfileAggressive)
+	if cfg.GetProfile() != ProfileAggressive {
+		t.Errorf("expected aggressive, got %s", cfg.GetProfile())
+	}
+}
+
+func TestAddBypassProcessConcurrent(t *testing.T) {
+	cfg := DefaultConfig()
+	var wg sync.WaitGroup
+
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func(n int) {
+			defer wg.Done()
+			cfg.AddBypassProcess(fmt.Sprintf("app%d.exe", n))
+		}(i)
+		go func() {
+			defer wg.Done()
+			cfg.ShouldBypass("dwm.exe")
+		}()
+	}
+	wg.Wait()
+
+	// All 50 apps should be in the bypass list
+	for i := 0; i < 50; i++ {
+		if !cfg.ShouldBypass(fmt.Sprintf("app%d.exe", i)) {
+			t.Errorf("app%d.exe should be bypassed", i)
+		}
 	}
 }
