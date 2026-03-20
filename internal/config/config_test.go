@@ -59,6 +59,11 @@ func TestDefaultConfig(t *testing.T) {
 func TestShouldBypass(t *testing.T) {
 	cfg := DefaultConfig()
 
+	selfExe := "energystar.exe"
+	if exe, err := os.Executable(); err == nil {
+		selfExe = filepath.Base(exe)
+	}
+
 	tests := []struct {
 		name     string
 		process  string
@@ -71,7 +76,7 @@ func TestShouldBypass(t *testing.T) {
 		{"explorer", "explorer.exe", true},
 		{"svchost", "svchost.exe", true},
 		{"taskmgr", "taskmgr.exe", true},
-		{"self", "energystar.exe", true},
+		{"self", selfExe, true},
 		{"self go", "energystar-go.exe", false},
 		{"edge", "msedge.exe", false},
 		{"random app", "notepad.exe", false},

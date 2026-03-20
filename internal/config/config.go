@@ -138,6 +138,10 @@ type Config struct {
 	// read/written from multiple goroutines (auto-profile, idle, schedule, etc.).
 	mu sync.RWMutex `json:"-"`
 
+	// selfProcess is the current executable basename in lowercase. Cached so
+	// os.Executable() is not called repeatedly during profile switching.
+	selfProcess string `json:"-"`
+
 	// resolved bypass set (lowercase names)
 	bypassSet map[string]struct{}
 }
@@ -190,7 +194,6 @@ var BalancedBypassProcesses = []string{
 // Only realtime / kernel-critical processes are exempted; everything else
 // (indexing, update notifications, widgets, print spooler, …) is throttled.
 var AggressiveBypassProcesses = []string{
-	"energystar.exe", // Self
 	"smss.exe",      // Session Manager Subsystem
 	"csrss.exe",     // Client/Server Runtime Subsystem
 	"wininit.exe",   // Windows Init
@@ -210,7 +213,12 @@ var AggressiveBypassProcesses = []string{
 	"conhost.exe",    // Console host (terminal windows)
 	"taskeng.exe",    // Task scheduler engine
 	"fontdrvhost.exe", // Font driver host
+	"shellexperiencehost.exe", // Shell Experience Host
+	"startmenuexperiencehost.exe", // Start Menu Experience Host
+	"applicationframehost.exe", // UWP app container host
+	"searchhost.exe", // Start menu search host
 }
+
 
 // bypassListForProfile returns the built-in bypass list for the given profile.
 func bypassListForProfile(p Profile) []string {
@@ -296,10 +304,15 @@ func (c *Config) resolve() {
 	for _, p := range c.ExtraBypassProcesses {
 		c.bypassSet[strings.ToLower(p)] = struct{}{}
 	}
-	// Always bypass the current process name (self), regardless of binary name
-	if exe, err := os.Executable(); err == nil {
-		self := strings.ToLower(filepath.Base(exe))
-		c.bypassSet[self] = struct{}{}
+	// Always bypass the current process name (self), regardless of binary name.
+	// Cache the lookup so os.Executable isn't called on every resolve call.
+	if c.selfProcess == "" {
+		if exe, err := os.Executable(); err == nil {
+			c.selfProcess = strings.ToLower(filepath.Base(exe))
+		}
+	}
+	if c.selfProcess != "" {
+		c.bypassSet[c.selfProcess] = struct{}{}
 	}
 }
 
