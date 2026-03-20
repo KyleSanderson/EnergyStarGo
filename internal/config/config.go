@@ -156,6 +156,8 @@ var BalancedBypassProcesses = []string{
 	"textinputhost.exe",           // Touch keyboard host
 	"explorer.exe",                // Windows Explorer shell
 	"shellexperiencehost.exe",     // Shell UI host (animations, lock screen)
+	"lockapp.exe",                 // Lock screen
+	"logonui.exe",                 // Logon UI (password field input)
 	"startmenuexperiencehost.exe", // Start menu
 	"applicationframehost.exe",    // UWP app container
 	"searchhost.exe",              // Start menu search
@@ -206,6 +208,7 @@ var AggressiveBypassProcesses = []string{
 	"ctfmon.exe",   // Text Services Framework / IME
 	"inputapp.exe", // Touch & pen input dispatcher
 	"lockapp.exe",  // Lock screen
+	"logonui.exe",  // Logon UI (password field input)
 	// Additional robustness for Windows UI shell and scheduled task hosts:
 	"explorer.exe",   // Windows Explorer shell
 	"sihost.exe",     // Shell Infrastructure Host
