@@ -58,20 +58,20 @@ var (
 	modgdi32    = windows.NewLazySystemDLL("gdi32.dll")
 	modpowrprof = windows.NewLazySystemDLL("powrprof.dll")
 
-	procSetProcessInformation    = modkernel32.NewProc("SetProcessInformation")
-	procCreateToolhelp32Snapshot = modkernel32.NewProc("CreateToolhelp32Snapshot")
-	procProcess32FirstW          = modkernel32.NewProc("Process32FirstW")
-	procProcess32NextW           = modkernel32.NewProc("Process32NextW")
-	procProcessIdToSessionId     = modkernel32.NewProc("ProcessIdToSessionId")
-	procThread32First            = modkernel32.NewProc("Thread32First")
-	procThread32Next             = modkernel32.NewProc("Thread32Next")
-	procSetThreadInformation     = modkernel32.NewProc("SetThreadInformation")
-	procOpenThread               = modkernel32.NewProc("OpenThread")
-	procSetConsoleCtrlHandler    = modkernel32.NewProc("SetConsoleCtrlHandler")
-	procRtlMoveMemory            = modkernel32.NewProc("RtlMoveMemory")
-	procGlobalMemoryStatusEx     = modkernel32.NewProc("GlobalMemoryStatusEx")
-	procGetTickCount64           = modkernel32.NewProc("GetTickCount64")
-	procSetProcessAffinityMask   = modkernel32.NewProc("SetProcessAffinityMask")
+	procSetProcessInformation        = modkernel32.NewProc("SetProcessInformation")
+	procCreateToolhelp32Snapshot     = modkernel32.NewProc("CreateToolhelp32Snapshot")
+	procProcess32FirstW              = modkernel32.NewProc("Process32FirstW")
+	procProcess32NextW               = modkernel32.NewProc("Process32NextW")
+	procProcessIdToSessionId         = modkernel32.NewProc("ProcessIdToSessionId")
+	procThread32First                = modkernel32.NewProc("Thread32First")
+	procThread32Next                 = modkernel32.NewProc("Thread32Next")
+	procSetThreadInformation         = modkernel32.NewProc("SetThreadInformation")
+	procOpenThread                   = modkernel32.NewProc("OpenThread")
+	procSetConsoleCtrlHandler        = modkernel32.NewProc("SetConsoleCtrlHandler")
+	procRtlMoveMemory                = modkernel32.NewProc("RtlMoveMemory")
+	procGlobalMemoryStatusEx         = modkernel32.NewProc("GlobalMemoryStatusEx")
+	procGetTickCount64               = modkernel32.NewProc("GetTickCount64")
+	procSetProcessAffinityMask       = modkernel32.NewProc("SetProcessAffinityMask")
 	procWTSGetActiveConsoleSessionId = modkernel32.NewProc("WTSGetActiveConsoleSessionId")
 
 	procSetWinEventHook     = moduser32.NewProc("SetWinEventHook")
@@ -327,6 +327,7 @@ func GetCurrentProcessSessionId() (uint32, error) {
 	pid := windows.GetCurrentProcessId()
 	return ProcessIdToSessionId(pid)
 }
+
 // WTSGetActiveConsoleSessionId returns the session ID of the session attached to the physical console.
 // If no session is attached, the return value is 0xFFFFFFFF.
 func WTSGetActiveConsoleSessionId() (uint32, error) {
@@ -336,6 +337,7 @@ func WTSGetActiveConsoleSessionId() (uint32, error) {
 	}
 	return uint32(ret), err
 }
+
 // ProcessNameFromEntry extracts the process name string from a PROCESSENTRY32W.
 func ProcessNameFromEntry(entry *PROCESSENTRY32W) string {
 	return syscall.UTF16ToString(entry.ExeFile[:])
