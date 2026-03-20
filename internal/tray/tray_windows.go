@@ -1,0 +1,594 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2024 Kyle Sanderson
+
+//go:build windows
+
+// Package tray provides system tray icon support for EnergyStarGo.
+package tray
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"sync"
+	"syscall"
+	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+
+	"github.com/KyleSanderson/EnergyStarGo/internal/logger"
+)
+
+// Menu item IDs
+const (
+	idStatus    = 1001
+	idStats     = 1002
+	idSeparator = 1003
+	idPause     = 1004
+	idResume    = 1005
+	idRestore   = 1006
+	idExit      = 1007
+)
+
+// Win32 constants for tray
+const (
+	WM_USER      = 0x0400
+	WM_TRAYICON  = WM_USER + 1
+	WM_COMMAND   = 0x0111
+	WM_CLOSE     = 0x0010
+	WM_DESTROY   = 0x0002
+	WM_LBUTTONUP = 0x0202
+	WM_RBUTTONUP = 0x0205
+	WM_CREATE    = 0x0001
+
+	NIM_ADD    = 0x00000000
+	NIM_MODIFY = 0x00000001
+	NIM_DELETE = 0x00000002
+
+	NIF_MESSAGE = 0x00000001
+	NIF_ICON    = 0x00000002
+	NIF_TIP     = 0x00000004
+	NIF_INFO    = 0x00000010
+
+	NIS_HIDDEN = 0x00000001
+
+	NIIF_INFO    = 0x00000001
+	NIIF_WARNING = 0x00000002
+
+	TPM_BOTTOMALIGN = 0x0020
+	TPM_LEFTALIGN   = 0x0000
+	TPM_RIGHTBUTTON = 0x0002
+	TPM_RETURNCMD   = 0x0100
+
+	WS_OVERLAPPED = 0x00000000
+	CW_USEDEFAULT = 0x80000000
+
+	IDI_APPLICATION = 32512
+
+	MF_STRING    = 0x00000000
+	MF_SEPARATOR = 0x00000800
+	MF_GRAYED    = 0x00000001
+)
+
+var (
+	shell32              = windows.NewLazySystemDLL("shell32.dll")
+	user32               = windows.NewLazySystemDLL("user32.dll")
+	gdi32                = windows.NewLazySystemDLL("gdi32.dll")
+	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
+
+	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
+	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
+	procLoadIconW           = user32.NewProc("LoadIconW")
+	procCreateIconIndirect  = user32.NewProc("CreateIconIndirect")
+	procDestroyIcon         = user32.NewProc("DestroyIcon")
+	procDestroyWindow       = user32.NewProc("DestroyWindow")
+	procPostMessageW        = user32.NewProc("PostMessageW")
+	procCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
+	procAppendMenuW         = user32.NewProc("AppendMenuW")
+	procTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
+	procDestroyMenu         = user32.NewProc("DestroyMenu")
+	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	procGetCursorPos        = user32.NewProc("GetCursorPos")
+	procGetMessageW         = user32.NewProc("GetMessageW")
+	procTranslateMessage    = user32.NewProc("TranslateMessage")
+	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
+	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
+
+	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
+	procDeleteDC           = gdi32.NewProc("DeleteDC")
+	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
+	procDeleteObject       = gdi32.NewProc("DeleteObject")
+	procSelectObject       = gdi32.NewProc("SelectObject")
+)
+
+// NOTIFYICONDATAW is the Win32 NOTIFYICONDATAW struct.
+type NOTIFYICONDATAW struct {
+	CbSize           uint32
+	HWnd             uintptr
+	UID              uint32
+	UFlags           uint32
+	UCallbackMessage uint32
+	HIcon            uintptr
+	SzTip            [128]uint16
+	DwState          uint32
+	DwStateMask      uint32
+	SzInfo           [256]uint16
+	UVersion         uint32
+	SzInfoTitle      [64]uint16
+	DwInfoFlags      uint32
+	GuidItem         [16]byte
+	HBalloonIcon     uintptr
+}
+
+// WNDCLASSEXW
+type WNDCLASSEXW struct {
+	CbSize        uint32
+	Style         uint32
+	LpfnWndProc   uintptr
+	CbClsExtra    int32
+	CbWndExtra    int32
+	HInstance     uintptr
+	HIcon         uintptr
+	HCursor       uintptr
+	HbrBackground uintptr
+	LpszMenuName  uintptr
+	LpszClassName uintptr
+	HIconSm       uintptr
+}
+
+// POINT struct for GetCursorPos
+type POINT struct {
+	X, Y int32
+}
+
+// MSG struct
+type MSG struct {
+	Hwnd    uintptr
+	Message uint32
+	WParam  uintptr
+	LParam  uintptr
+	Time    uint32
+	Pt      POINT
+}
+
+// ICONINFO is the Win32 ICONINFO struct for CreateIconIndirect.
+type ICONINFO struct {
+	FIcon    uint32
+	XHotspot uint32
+	YHotspot uint32
+	HbmMask  uintptr
+	HbmColor uintptr
+}
+
+// BITMAPINFOHEADER is the Win32 BITMAPINFOHEADER struct.
+type BITMAPINFOHEADER struct {
+	BiSize          uint32
+	BiWidth         int32
+	BiHeight        int32
+	BiPlanes        uint16
+	BiBitCount      uint16
+	BiCompression   uint32
+	BiSizeImage     uint32
+	BiXPelsPerMeter int32
+	BiYPelsPerMeter int32
+	BiClrUsed       uint32
+	BiClrImportant  uint32
+}
+
+// createAppIcon creates a simple 16x16 ARGB icon with a green lightning bolt
+// on a dark background, suitable for the system tray.
+func createAppIcon() uintptr {
+	const size = 16
+
+	hdc, _, _ := procCreateCompatibleDC.Call(0)
+	if hdc == 0 {
+		return 0
+	}
+	defer procDeleteDC.Call(hdc)
+
+	// Create color bitmap (32-bit ARGB)
+	bmi := BITMAPINFOHEADER{
+		BiSize:     uint32(unsafe.Sizeof(BITMAPINFOHEADER{})),
+		BiWidth:    size,
+		BiHeight:   -size, // top-down
+		BiPlanes:   1,
+		BiBitCount: 32,
+	}
+
+	var bits unsafe.Pointer
+	hbmColor, _, _ := procCreateDIBSection.Call(
+		hdc,
+		uintptr(unsafe.Pointer(&bmi)),
+		0, // DIB_RGB_COLORS
+		uintptr(unsafe.Pointer(&bits)),
+		0, 0,
+	)
+	if hbmColor == 0 || bits == nil {
+		return 0
+	}
+
+	// Create mask bitmap
+	bmiMask := bmi
+	bmiMask.BiBitCount = 32
+	var maskBits unsafe.Pointer
+	hbmMask, _, _ := procCreateDIBSection.Call(
+		hdc,
+		uintptr(unsafe.Pointer(&bmiMask)),
+		0,
+		uintptr(unsafe.Pointer(&maskBits)),
+		0, 0,
+	)
+	if hbmMask == 0 {
+		procDeleteObject.Call(hbmColor)
+		return 0
+	}
+
+	// Draw a lightning bolt icon
+	// Pixel layout: BGRA format
+	pixels := unsafe.Slice((*[4]byte)(bits), size*size)
+	maskPixels := unsafe.Slice((*[4]byte)(maskBits), size*size)
+
+	// Lightning bolt shape (16x16 grid, 1 = bolt, 0 = background)
+	bolt := [16][16]byte{
+		{0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+	}
+
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			idx := y*size + x
+			if bolt[y][x] == 1 {
+				// Green lightning bolt: BGRA
+				pixels[idx] = [4]byte{0x00, 0xCC, 0x44, 0xFF}
+			} else {
+				// Dark background: BGRA
+				pixels[idx] = [4]byte{0x30, 0x30, 0x30, 0xFF}
+			}
+			// Mask: all zeros = opaque
+			maskPixels[idx] = [4]byte{0x00, 0x00, 0x00, 0x00}
+		}
+	}
+
+	iconInfo := ICONINFO{
+		FIcon:    1, // TRUE = icon
+		HbmMask:  hbmMask,
+		HbmColor: hbmColor,
+	}
+
+	hIcon, _, _ := procCreateIconIndirect.Call(uintptr(unsafe.Pointer(&iconInfo)))
+
+	// Bitmaps can be deleted after icon creation
+	procDeleteObject.Call(hbmColor)
+	procDeleteObject.Call(hbmMask)
+
+	return hIcon
+}
+
+// TrayCallbacks holds callbacks for tray menu actions.
+type TrayCallbacks struct {
+	OnPause   func()
+	OnResume  func()
+	OnRestore func()
+	OnExit    func()
+	GetStats  func() string
+	IsPaused  func() bool
+}
+
+// Tray manages the system tray icon.
+type Tray struct {
+	log       *logger.Logger
+	callbacks TrayCallbacks
+	hwnd      uintptr
+	nid       NOTIFYICONDATAW
+	mu        sync.Mutex
+	running   bool
+}
+
+// New creates a new Tray.
+func New(log *logger.Logger, callbacks TrayCallbacks) *Tray {
+	return &Tray{
+		log:       log,
+		callbacks: callbacks,
+	}
+}
+
+var activeTray *Tray
+
+// Run starts the tray icon. Must be called from a thread-locked goroutine.
+func (t *Tray) Run() error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	activeTray = t
+
+	// Register window class
+	className, _ := syscall.UTF16PtrFromString("EnergyStarGoTray")
+	hInstance := uintptr(0)
+
+	wndProc := syscall.NewCallback(trayWndProc)
+
+	var wc WNDCLASSEXW
+	wc.CbSize = uint32(unsafe.Sizeof(wc))
+	wc.LpfnWndProc = wndProc
+	wc.HInstance = hInstance
+	wc.LpszClassName = uintptr(unsafe.Pointer(className))
+
+	ret, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+	if ret == 0 {
+		return fmt.Errorf("RegisterClassExW failed: %w", err)
+	}
+
+	// Load default application icon
+	hIcon := createAppIcon()
+	if hIcon == 0 {
+		// Fallback to system application icon
+		hIcon, _, _ = procLoadIconW.Call(0, uintptr(IDI_APPLICATION))
+	}
+
+	// Create hidden window for message handling
+	windowName, _ := syscall.UTF16PtrFromString("EnergyStarGo")
+	t.hwnd, _, err = procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(className)),
+		uintptr(unsafe.Pointer(windowName)),
+		WS_OVERLAPPED,
+		uintptr(CW_USEDEFAULT), uintptr(CW_USEDEFAULT),
+		uintptr(CW_USEDEFAULT), uintptr(CW_USEDEFAULT),
+		0, 0, hInstance, 0,
+	)
+	if t.hwnd == 0 {
+		return fmt.Errorf("CreateWindowExW failed: %w", err)
+	}
+
+	// Set up notify icon data
+	t.nid.CbSize = uint32(unsafe.Sizeof(t.nid))
+	t.nid.HWnd = t.hwnd
+	t.nid.UID = 1
+	t.nid.UFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+	t.nid.UCallbackMessage = WM_TRAYICON
+	t.nid.HIcon = hIcon
+	copy(t.nid.SzTip[:], utf16From("EnergyStarGo - Running"))
+
+	// Add tray icon
+	ret, _, err = procShellNotifyIconW.Call(NIM_ADD, uintptr(unsafe.Pointer(&t.nid)))
+	if ret == 0 {
+		return fmt.Errorf("Shell_NotifyIconW ADD failed: %w", err)
+	}
+
+	t.mu.Lock()
+	t.running = true
+	t.mu.Unlock()
+
+	t.log.Info("system tray icon initialized")
+
+	// Message loop
+	var msg MSG
+	for {
+		ret, _, _ := procGetMessageW.Call(
+			uintptr(unsafe.Pointer(&msg)),
+			0, 0, 0,
+		)
+		if int32(ret) <= 0 {
+			break
+		}
+		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
+		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+	}
+
+	// Clean up
+	procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&t.nid)))
+	t.mu.Lock()
+	t.running = false
+	t.mu.Unlock()
+
+	return nil
+}
+
+// Stop removes the tray icon and closes the tray window.
+// Safe to call from any goroutine.
+func (t *Tray) Stop() {
+	t.mu.Lock()
+	running := t.running
+	t.mu.Unlock()
+	if running {
+		// PostMessage WM_CLOSE is safe to call cross-thread and triggers
+		// DestroyWindow in the wndproc, which then sends WM_DESTROY.
+		procPostMessageW.Call(t.hwnd, WM_CLOSE, 0, 0)
+	}
+}
+
+// ShowNotification displays a balloon notification from the tray icon.
+func (t *Tray) ShowNotification(title, message string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.running {
+		return
+	}
+
+	t.nid.UFlags = NIF_INFO
+	copy(t.nid.SzInfoTitle[:], utf16From(title))
+	copy(t.nid.SzInfo[:], utf16From(message))
+	t.nid.DwInfoFlags = NIIF_INFO
+
+	procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&t.nid)))
+
+	// Reset flags
+	t.nid.UFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+}
+
+// UpdateTooltip changes the tray icon tooltip text.
+func (t *Tray) UpdateTooltip(text string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.running {
+		return
+	}
+
+	copy(t.nid.SzTip[:], utf16From(text))
+	t.nid.UFlags = NIF_TIP
+	procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&t.nid)))
+	t.nid.UFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+}
+
+func trayWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
+	t := activeTray
+	if t == nil {
+		ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
+		return ret
+	}
+
+	switch msg {
+	case WM_TRAYICON:
+		switch lParam {
+		case WM_RBUTTONUP:
+			showContextMenu(t, hwnd)
+		case WM_LBUTTONUP:
+			showContextMenu(t, hwnd)
+		}
+		return 0
+
+	case WM_COMMAND:
+		handleMenuCommand(t, uint32(wParam))
+		return 0
+
+	case WM_CLOSE:
+		// WM_CLOSE is posted by Stop(). Call DestroyWindow which
+		// triggers WM_DESTROY on the same thread.
+		procDestroyWindow.Call(hwnd)
+		return 0
+
+	case WM_DESTROY:
+		procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&t.nid)))
+		procPostQuitMessage.Call(0)
+		return 0
+	}
+
+	ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
+	return ret
+}
+
+func showContextMenu(t *Tray, hwnd uintptr) {
+	hMenu, _, _ := procCreatePopupMenu.Call()
+	if hMenu == 0 {
+		return
+	}
+	defer procDestroyMenu.Call(hMenu)
+
+	// Status line (grayed)
+	isPaused := false
+	if t.callbacks.IsPaused != nil {
+		isPaused = t.callbacks.IsPaused()
+	}
+	statusText := "EnergyStarGo: Running"
+	if isPaused {
+		statusText = "EnergyStarGo: Paused"
+	}
+	appendMenu(hMenu, MF_STRING|MF_GRAYED, idStatus, statusText)
+
+	// Stats line (grayed)
+	if t.callbacks.GetStats != nil {
+		statsText := t.callbacks.GetStats()
+		appendMenu(hMenu, MF_STRING|MF_GRAYED, idStats, statsText)
+	}
+
+	appendMenu(hMenu, MF_SEPARATOR, idSeparator, "")
+
+	if isPaused {
+		appendMenu(hMenu, MF_STRING, idResume, "Resume")
+	} else {
+		appendMenu(hMenu, MF_STRING, idPause, "Pause")
+	}
+
+	appendMenu(hMenu, MF_STRING, idRestore, "Restore All Processes")
+	appendMenu(hMenu, MF_SEPARATOR, idSeparator, "")
+	appendMenu(hMenu, MF_STRING, idExit, "Exit")
+
+	// Show menu at cursor position
+	var pt POINT
+	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	procSetForegroundWindow.Call(hwnd)
+	cmd, _, _ := procTrackPopupMenu.Call(
+		hMenu,
+		TPM_BOTTOMALIGN|TPM_LEFTALIGN|TPM_RIGHTBUTTON|TPM_RETURNCMD,
+		uintptr(pt.X), uintptr(pt.Y),
+		0, hwnd, 0,
+	)
+	// TPM_RETURNCMD makes TrackPopupMenu return the selected command ID
+	// directly instead of posting WM_COMMAND. Dispatch it ourselves.
+	if cmd != 0 {
+		handleMenuCommand(t, uint32(cmd))
+	}
+}
+
+// callbackTimeout is the maximum duration for any tray callback.
+const callbackTimeout = 1 * time.Second
+
+func handleMenuCommand(t *Tray, id uint32) {
+	switch id {
+	case idPause:
+		if t.callbacks.OnPause != nil {
+			go t.runCallback("OnPause", t.callbacks.OnPause)
+			t.UpdateTooltip("EnergyStarGo - Paused")
+		}
+	case idResume:
+		if t.callbacks.OnResume != nil {
+			go t.runCallback("OnResume", t.callbacks.OnResume)
+			t.UpdateTooltip("EnergyStarGo - Running")
+		}
+	case idRestore:
+		if t.callbacks.OnRestore != nil {
+			go t.runCallback("OnRestore", t.callbacks.OnRestore)
+		}
+	case idExit:
+		if t.callbacks.OnExit != nil {
+			go t.runCallback("OnExit", t.callbacks.OnExit)
+		}
+		t.Stop()
+	}
+}
+
+// runCallback executes a callback with a timeout. If the callback takes longer
+// than callbackTimeout, the context is cancelled and an error is logged.
+func (t *Tray) runCallback(name string, fn func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), callbackTimeout)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+
+	select {
+	case <-done:
+		// Callback completed in time.
+	case <-ctx.Done():
+		t.log.Error("tray callback timed out", "callback", name, "timeout", callbackTimeout.String())
+	}
+}
+
+func appendMenu(hMenu uintptr, flags uint32, id uint32, text string) {
+	textPtr, _ := syscall.UTF16PtrFromString(text)
+	procAppendMenuW.Call(hMenu, uintptr(flags), uintptr(id), uintptr(unsafe.Pointer(textPtr)))
+}
+
+func utf16From(s string) []uint16 {
+	u, _ := syscall.UTF16FromString(s)
+	return u
+}
