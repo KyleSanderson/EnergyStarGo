@@ -145,111 +145,63 @@ type Config struct {
 // BalancedBypassProcesses is the default profile: protects responsiveness for
 // typical developer / knowledge-worker laptop use while throttling background
 // work (indexing, update notifications, widgets, etc.).
+//
+// This list is additive on top of AggressiveBypassProcesses.
 var BalancedBypassProcesses = []string{
-	// Self
-	"energystar.exe",
-
-	// ── Kernel & session management (non-negotiable) ──────────────────────
-	"smss.exe",    // Session Manager Subsystem
-	"csrss.exe",   // Client/Server Runtime Subsystem
-	"wininit.exe", // Windows Init
-	"winlogon.exe",
-	"lsass.exe", // Authentication & token management
-	"services.exe",
-	"svchost.exe", // Service host processes (audio, network, …)
-	"wudfrd.exe",  // Windows Driver Foundation
-
-	// ── Realtime / perceptible-latency critical ───────────────────────────
-	"dwm.exe",     // Desktop Window Manager — composition & rendering
-	"audiodg.exe", // Audio Device Graph — glitches are immediately audible
-
-	// ── Input (keyboard, touch, pen) ─────────────────────────────────────
-	"ctfmon.exe",        // Text Services Framework / IME
-	"chsime.exe",        // CJK IME
-	"inputapp.exe",      // Touch & pen input dispatcher
-	"textinputhost.exe", // Touch keyboard host
-
-	// ── Explorer shell & UI infrastructure ───────────────────────────────
-	"explorer.exe",
-	"shellexperiencehost.exe",
-	"startmenuexperiencehost.exe",
-	"applicationframehost.exe", // UWP app container
-	"searchhost.exe",           // Start menu search
-	"sihost.exe",               // Shell Infrastructure (system tray)
-	"runtimebroker.exe",        // App activation & permission brokering
-
-	// ── Core system utilities ─────────────────────────────────────────────
-	"taskhostw.exe", // Task Scheduler host
-	"wmiprvse.exe",  // WMI (battery status, hardware monitoring)
-	"conhost.exe",   // Console host (terminal windows)
-	"dllhost.exe",   // COM/OLE surrogate
-	"taskmgr.exe",   // Task Manager
-	"lockapp.exe",   // Lock screen
-
-	// ── Windows Security ──────────────────────────────────────────────────
-	"msmpeng.exe",  // Windows Defender real-time protection
-	"mpcmdrun.exe", // Defender command runner
-	"securityhealthservice.exe",
-	"securityhealthsystray.exe",
-
-	// ── System settings & notifications ──────────────────────────────────
-	"systemsettings.exe",
-
-	// ── FontdrvHost — needed during text rendering ────────────────────────
-	"fontdrvhost.exe",
-
-	// ── Debugging / sysadmin tools ────────────────────────────────────────
-	"procmon.exe",
-	"procmon64.exe",
-
-	// ── Audio / video / communication ─────────────────────────────────────
-	"discord.exe",
-	"teams.exe",
-	"ms-teams.exe",
-	"zoom.exe",
-	"slack.exe",
-	"skype.exe",
-	"obs64.exe",
-	"obs32.exe",
-	"vlc.exe",
-	"mpc-hc64.exe",
-	"spotify.exe",
-	"wmplayer.exe",
-	"foobar2000.exe",
-	"musicbee.exe",
+	"chsime.exe",                  // CJK IME
+	"textinputhost.exe",           // Touch keyboard host
+	"explorer.exe",                // Windows Explorer shell
+	"shellexperiencehost.exe",     // Shell UI host (animations, lock screen)
+	"startmenuexperiencehost.exe", // Start menu
+	"applicationframehost.exe",    // UWP app container
+	"searchhost.exe",              // Start menu search
+	"sihost.exe",                  // Shell Infrastructure (system tray)
+	"runtimebroker.exe",           // App activation & permission brokering
+	"taskhostw.exe",               // Task Scheduler host
+	"wmiprvse.exe",                // WMI (battery status, hardware monitoring)
+	"conhost.exe",                 // Console host (terminal windows)
+	"dllhost.exe",                 // COM/OLE surrogate
+	"taskmgr.exe",                 // Task Manager
+	"msmpeng.exe",                 // Windows Defender real-time protection
+	"mpcmdrun.exe",                // Defender command runner
+	"securityhealthservice.exe",   // Windows Security Health Service
+	"securityhealthsystray.exe",   // Windows Security Health Tray
+	"systemsettings.exe",          // System Settings
+	"fontdrvhost.exe",             // Font driver host
+	"procmon.exe",                 // Sysinternals Process Monitor
+	"procmon64.exe",               // Sysinternals Process Monitor (x64)
+	"discord.exe",                 // Discord (audio/video)
+	"teams.exe",                   // Microsoft Teams
+	"ms-teams.exe",                // Microsoft Teams (alt)
+	"zoom.exe",                    // Zoom
+	"slack.exe",                   // Slack
+	"skype.exe",                   // Skype
+	"obs64.exe",                   // OBS Studio (x64)
+	"obs32.exe",                   // OBS Studio (x86)
+	"vlc.exe",                     // VLC Media Player
+	"mpc-hc64.exe",                // Media Player Classic (x64)
+	"spotify.exe",                 // Spotify
+	"wmplayer.exe",                // Windows Media Player
+	"foobar2000.exe",              // Foobar2000
+	"musicbee.exe",                // MusicBee
 }
 
 // AggressiveBypassProcesses is the minimum list for maximum battery savings.
 // Only realtime / kernel-critical processes are exempted; everything else
 // (indexing, update notifications, widgets, print spooler, …) is throttled.
 var AggressiveBypassProcesses = []string{
-	// Self
-	"energystar.exe",
-
-	// ── Kernel (absolute minimum) ─────────────────────────────────────────
-	"smss.exe",
-	"csrss.exe",
-	"wininit.exe",
-	"winlogon.exe",
-	"lsass.exe",
-	"services.exe",
-	"svchost.exe",
-
-	// ── Realtime critical ─────────────────────────────────────────────────
-	"dwm.exe",
-	"audiodg.exe",
-
-	// ── Input ─────────────────────────────────────────────────────────────
-	"ctfmon.exe",
-	"inputapp.exe",
-
-	// ── Shell (minimal) ───────────────────────────────────────────────────
-	"explorer.exe",
-	"applicationframehost.exe",
-
-	// ── Security ──────────────────────────────────────────────────────────
-	"msmpeng.exe",
-	"lsass.exe",
+	"smss.exe",     // Session Manager Subsystem
+	"csrss.exe",    // Client/Server Runtime Subsystem
+	"wininit.exe",  // Windows Init
+	"winlogon.exe", // Windows Logon
+	"lsass.exe",    // Local Security Authority
+	"services.exe", // Service Control Manager
+	"svchost.exe",  // Service host processes (audio, network, ...)
+	"dwm.exe",      // Desktop Window Manager
+	"audiodg.exe",  // Audio Device Graph
+	"ctfmon.exe",   // Text Services Framework / IME
+	"inputapp.exe", // Touch & pen input dispatcher
+	"lockapp.exe",  // Lock screen
 }
 
 // bypassListForProfile returns the built-in bypass list for the given profile.
@@ -322,13 +274,24 @@ func (c *Config) resolve() {
 		c.HousekeepingInterval = 5 * time.Minute
 	}
 
-	base := c.effectiveBypassList()
-	c.bypassSet = make(map[string]struct{}, len(base)+len(c.ExtraBypassProcesses))
-	for _, p := range base {
+	// Always start with the aggressive base set
+	c.bypassSet = make(map[string]struct{}, len(AggressiveBypassProcesses)+len(BalancedBypassProcesses)+len(c.ExtraBypassProcesses)+1)
+	for _, p := range AggressiveBypassProcesses {
 		c.bypassSet[strings.ToLower(p)] = struct{}{}
+	}
+	// If profile is balanced, add the extended set
+	if c.Profile == ProfileBalanced {
+		for _, p := range BalancedBypassProcesses {
+			c.bypassSet[strings.ToLower(p)] = struct{}{}
+		}
 	}
 	for _, p := range c.ExtraBypassProcesses {
 		c.bypassSet[strings.ToLower(p)] = struct{}{}
+	}
+	// Always bypass the current process name (self), regardless of binary name
+	if exe, err := os.Executable(); err == nil {
+		self := strings.ToLower(filepath.Base(exe))
+		c.bypassSet[self] = struct{}{}
 	}
 }
 
