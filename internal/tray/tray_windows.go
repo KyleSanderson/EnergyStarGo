@@ -342,6 +342,12 @@ type TrayCallbacks struct {
 	OnRestartElevated func()
 	// Display state change — called when screen turns on/off
 	OnDisplayStateChange func(displayOn bool)
+	// Session state change — called for WTS_SESSION_* events
+	OnSessionChange func(eventType uint32)
+	// Power source change — called when AC/battery changes
+	OnPowerSourceChange func(onAC bool)
+	// Power plan change — called when the active power scheme changes
+	OnPowerPlanChange func(planGUID winapi.GUID)
 	// Profile preset selection from tray menu
 	OnSetProfile func(profile string)
 	// Returns the current profile name (e.g. "balanced", "aggressive")
@@ -350,12 +356,16 @@ type TrayCallbacks struct {
 
 // Tray manages the system tray icon.
 type Tray struct {
-	log       *logger.Logger
-	callbacks TrayCallbacks
-	hwnd      uintptr
-	nid       NOTIFYICONDATAW
-	mu        sync.Mutex
-	running   bool
+	log                     *logger.Logger
+	callbacks               TrayCallbacks
+	hwnd                    uintptr
+	nid                     NOTIFYICONDATAW
+	mu                      sync.Mutex
+	running                 bool
+	displayStateNotifHandle uintptr
+	powerSourceNotifHandle  uintptr
+	powerPlanNotifHandle    uintptr
+	wtsSessionNotifHandle   uintptr
 }
 
 // New creates a new Tray.
@@ -439,7 +449,40 @@ func (t *Tray) Run() error {
 		if h, err := winapi.RegisterPowerSettingNotification(t.hwnd, &guid, winapi.DEVICE_NOTIFY_WINDOW_HANDLE); err != nil {
 			t.log.Warn("failed to register display state notification", "error", err)
 		} else {
+			t.displayStateNotifHandle = h
 			t.log.Info("display state notification registered", "handle", h)
+		}
+	}
+
+	// Register for AC/battery source changes.
+	if t.callbacks.OnPowerSourceChange != nil {
+		guid := winapi.GUID_ACDC_POWER_SOURCE
+		if h, err := winapi.RegisterPowerSettingNotification(t.hwnd, &guid, winapi.DEVICE_NOTIFY_WINDOW_HANDLE); err != nil {
+			t.log.Warn("failed to register power source notification", "error", err)
+		} else {
+			t.powerSourceNotifHandle = h
+			t.log.Info("power source notification registered", "handle", h)
+		}
+	}
+
+	// Register for power plan (scheme) changes.
+	if t.callbacks.OnPowerPlanChange != nil {
+		guid := winapi.GUID_POWER_SCHEME_PERSONALITY
+		if h, err := winapi.RegisterPowerSettingNotification(t.hwnd, &guid, winapi.DEVICE_NOTIFY_WINDOW_HANDLE); err != nil {
+			t.log.Warn("failed to register power plan notification", "error", err)
+		} else {
+			t.powerPlanNotifHandle = h
+			t.log.Info("power plan notification registered", "handle", h)
+		}
+	}
+
+	// Register for session change notifications if a callback is set.
+	if t.callbacks.OnSessionChange != nil {
+		if err := winapi.WTSRegisterSessionNotification(t.hwnd, winapi.NOTIFY_FOR_THIS_SESSION); err != nil {
+			t.log.Warn("failed to register session notification", "error", err)
+		} else {
+			t.wtsSessionNotifHandle = t.hwnd
+			t.log.Info("session notification registered")
 		}
 	}
 
@@ -459,7 +502,19 @@ func (t *Tray) Run() error {
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
 	}
 
-	// Clean up
+	// Clean up.
+	if t.displayStateNotifHandle != 0 {
+		_ = winapi.UnregisterPowerSettingNotification(t.displayStateNotifHandle)
+	}
+	if t.powerSourceNotifHandle != 0 {
+		_ = winapi.UnregisterPowerSettingNotification(t.powerSourceNotifHandle)
+	}
+	if t.powerPlanNotifHandle != 0 {
+		_ = winapi.UnregisterPowerSettingNotification(t.powerPlanNotifHandle)
+	}
+	if t.wtsSessionNotifHandle != 0 {
+		_ = winapi.WTSUnRegisterSessionNotification(t.wtsSessionNotifHandle)
+	}
 	procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&t.nid)))
 	t.mu.Lock()
 	t.running = false
@@ -542,15 +597,37 @@ func trayWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		return 0
 
 	case winapi.WM_POWERBROADCAST:
-		if wParam == winapi.PBT_POWERSETTINGCHANGE && t.callbacks.OnDisplayStateChange != nil {
-			// Copy the kernel-provided POWERBROADCAST_SETTING into Go memory
-			// via RtlMoveMemory. This avoids the uintptr→unsafe.Pointer cast
-			// that go vet flags as a false positive in Win32 callbacks.
+		if wParam == winapi.PBT_POWERSETTINGCHANGE {
 			var pbs winapi.POWERBROADCAST_SETTING
 			winapi.CopyFromUintptr(unsafe.Pointer(&pbs), lParam, unsafe.Sizeof(pbs))
-			if pbs.DataLength >= 1 {
-				t.callbacks.OnDisplayStateChange(pbs.Data[0] != winapi.DISPLAY_OFF)
+			settingGUID := guidFromPowerSetting(pbs.PowerSetting)
+
+			if settingGUID == winapi.GUID_CONSOLE_DISPLAY_STATE && t.callbacks.OnDisplayStateChange != nil {
+				if pbs.DataLength >= 1 {
+					t.callbacks.OnDisplayStateChange(pbs.Data[0] != winapi.DISPLAY_OFF)
+				}
 			}
+
+			if settingGUID == winapi.GUID_ACDC_POWER_SOURCE && t.callbacks.OnPowerSourceChange != nil {
+				if pbs.DataLength >= 1 {
+					// 0 = AC, 1 = battery
+					isAC := pbs.Data[0] == 0
+					t.callbacks.OnPowerSourceChange(isAC)
+				}
+			}
+
+			if settingGUID == winapi.GUID_POWER_SCHEME_PERSONALITY && t.callbacks.OnPowerPlanChange != nil {
+				if pbs.DataLength >= 16 {
+					planGUID := guidFromPowerSetting(*(*[16]byte)(unsafe.Pointer(&pbs.Data[0])))
+					t.callbacks.OnPowerPlanChange(planGUID)
+				}
+			}
+		}
+		return 0
+
+	case winapi.WM_WTSSESSION_CHANGE:
+		if t.callbacks.OnSessionChange != nil {
+			t.callbacks.OnSessionChange(uint32(wParam))
 		}
 		return 0
 
@@ -562,6 +639,15 @@ func trayWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
 	return ret
+}
+
+func guidFromPowerSetting(raw [16]byte) winapi.GUID {
+	return winapi.GUID{
+		Data1: uint32(raw[0]) | uint32(raw[1])<<8 | uint32(raw[2])<<16 | uint32(raw[3])<<24,
+		Data2: uint16(raw[4]) | uint16(raw[5])<<8,
+		Data3: uint16(raw[6]) | uint16(raw[7])<<8,
+		Data4: [8]byte{raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15]},
+	}
 }
 
 func showContextMenu(t *Tray, hwnd uintptr) {

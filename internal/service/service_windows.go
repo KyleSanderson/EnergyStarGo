@@ -39,7 +39,7 @@ func NewService(cfg *config.Config, log *logger.Logger) *EnergyStarService {
 
 // Execute implements svc.Handler. It is called by the Windows service control manager.
 func (s *EnergyStarService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
-	const acceptedCmds = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPauseAndContinue
+	const acceptedCmds = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPauseAndContinue | svc.AcceptPowerEvent | svc.AcceptSessionChange
 
 	changes <- svc.Status{State: svc.StartPending}
 
@@ -88,6 +88,18 @@ func (s *EnergyStarService) Execute(args []string, r <-chan svc.ChangeRequest, c
 			switch c.Cmd {
 			case svc.Interrogate:
 				changes <- c.CurrentStatus
+			case svc.PowerEvent:
+				s.log.Info("service power event received")
+				if !s.cfg.BoostForegroundOnly {
+					s.engine.ThrottleAllUserBackgroundProcesses()
+				}
+				changes <- svc.Status{State: svc.Running, Accepts: acceptedCmds}
+			case svc.SessionChange:
+				s.log.Info("service session change received", "event_type", c.EventType)
+				if !s.cfg.BoostForegroundOnly {
+					s.engine.ThrottleAllUserBackgroundProcesses()
+				}
+				changes <- svc.Status{State: svc.Running, Accepts: acceptedCmds}
 			case svc.Stop, svc.Shutdown:
 				s.log.Info("service stop requested")
 				changes <- svc.Status{State: svc.StopPending}

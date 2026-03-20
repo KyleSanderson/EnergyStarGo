@@ -88,7 +88,11 @@ var (
 	procMonitorFromWindow = moduser32.NewProc("MonitorFromWindow")
 	procGetMonitorInfoW   = moduser32.NewProc("GetMonitorInfoW")
 
-	procRegisterPowerSettingNotification = moduser32.NewProc("RegisterPowerSettingNotification")
+	procRegisterPowerSettingNotification   = moduser32.NewProc("RegisterPowerSettingNotification")
+	procUnregisterPowerSettingNotification = moduser32.NewProc("UnregisterPowerSettingNotification")
+
+	procWTSRegisterSessionNotification   = moduser32.NewProc("WTSRegisterSessionNotification")
+	procWTSUnRegisterSessionNotification = moduser32.NewProc("WTSUnRegisterSessionNotification")
 
 	procD3DKMTSetProcessSchedulingPriorityClass = modgdi32.NewProc("D3DKMTSetProcessSchedulingPriorityClass")
 
@@ -487,6 +491,33 @@ func CopyFromUintptr(dst unsafe.Pointer, src uintptr, length uintptr) {
 	procRtlMoveMemory.Call(uintptr(dst), src, length)
 }
 
+// GUID_ACDC_POWER_SOURCE is the power setting GUID that fires when AC/battery state changes.
+// {5D3E9A59-E9D5-4B00-A6BD-FF34FF516548}
+var GUID_ACDC_POWER_SOURCE = windows.GUID{
+	Data1: 0x5D3E9A59,
+	Data2: 0xE9D5,
+	Data3: 0x4B00,
+	Data4: [8]byte{0xA6, 0xBD, 0xFF, 0x34, 0xFF, 0x51, 0x65, 0x48},
+}
+
+// GUID_POWER_SCHEME_PERSONALITY is the power setting GUID that fires on plan changes.
+// {245D8541-3943-4422-B025-13A784F679B7}
+var GUID_POWER_SCHEME_PERSONALITY = windows.GUID{
+	Data1: 0x245D8541,
+	Data2: 0x3943,
+	Data3: 0x4422,
+	Data4: [8]byte{0xB0, 0x25, 0x13, 0xA7, 0x84, 0xF6, 0x79, 0xB7},
+}
+
+// GUID_BATTERY_PERCENTAGE_REMAINING fires when battery remaining percent is updated.
+// {A7AD8041-B45A-4CAE-87A3-EECBB468A9E1}
+var GUID_BATTERY_PERCENTAGE_REMAINING = windows.GUID{
+	Data1: 0xA7AD8041,
+	Data2: 0xB45A,
+	Data3: 0x4CAE,
+	Data4: [8]byte{0x87, 0xA3, 0xEE, 0xCB, 0xB4, 0x68, 0xA9, 0xE1},
+}
+
 // GUID_CONSOLE_DISPLAY_STATE is the power setting GUID that fires when the
 // console display changes state (off / on / dimmed).
 // {6FE69556-704A-47A0-8F24-C28D936FDA47}
@@ -509,4 +540,31 @@ func RegisterPowerSettingNotification(hwnd uintptr, guid *windows.GUID, flags ui
 		return 0, err
 	}
 	return ret, nil
+}
+
+// UnregisterPowerSettingNotification unregisters a previously registered notification handle.
+func UnregisterPowerSettingNotification(handle uintptr) error {
+	ret, _, err := procUnregisterPowerSettingNotification.Call(handle)
+	if ret == 0 {
+		return err
+	}
+	return nil
+}
+
+// WTSRegisterSessionNotification registers a window to receive WM_WTSSESSION_CHANGE.
+func WTSRegisterSessionNotification(hwnd uintptr, flags uint32) error {
+	ret, _, err := procWTSRegisterSessionNotification.Call(hwnd, uintptr(flags))
+	if ret == 0 {
+		return err
+	}
+	return nil
+}
+
+// WTSUnRegisterSessionNotification unregisters a window from WM_WTSSESSION_CHANGE.
+func WTSUnRegisterSessionNotification(hwnd uintptr) error {
+	ret, _, err := procWTSUnRegisterSessionNotification.Call(hwnd)
+	if ret == 0 {
+		return err
+	}
+	return nil
 }

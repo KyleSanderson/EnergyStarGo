@@ -476,14 +476,18 @@ func (e *Engine) RunMessageLoop() {
 		winapi.WINEVENT_OUTOFCONTEXT|winapi.WINEVENT_SKIPOWNPROCESS,
 	)
 	if e.hookHandle == 0 {
-		e.log.Error("failed to set WinEvent hook")
+		e.log.Warn("failed to set WinEvent hook; running without foreground event notifications")
+		// Fallback path: there is no events to process, so wait for stop.
+		<-e.stopCh
 		return
 	}
 	e.log.Info("foreground event hook installed")
 
 	defer func() {
-		winapi.UnhookWinEvent(e.hookHandle)
-		e.log.Info("foreground event hook removed")
+		if e.hookHandle != 0 {
+			winapi.UnhookWinEvent(e.hookHandle)
+			e.log.Info("foreground event hook removed")
+		}
 	}()
 
 	// Message loop — GetMessage blocks until a message is available.

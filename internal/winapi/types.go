@@ -3,6 +3,11 @@
 
 package winapi
 
+import "golang.org/x/sys/windows"
+
+// GUID alias of windows.GUID for cross-package convenience.
+type GUID = windows.GUID
+
 // PROCESS_POWER_THROTTLING_STATE is the struct passed to SetProcessInformation
 // for ProcessPowerThrottling class. Size: 12 bytes (3 x uint32).
 type PROCESS_POWER_THROTTLING_STATE struct {

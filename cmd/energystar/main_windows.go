@@ -672,6 +672,58 @@ func cmdRun() {
 			GetProfile: func() string {
 				return string(cfg.GetProfile())
 			},
+			OnPowerSourceChange: func(onAC bool) {
+				if !cfg.AutoProfile.Enabled {
+					return
+				}
+				onBatteryProfile := cfg.AutoProfile.OnBattery
+				if onBatteryProfile == "" {
+					onBatteryProfile = config.ProfileAggressive
+				}
+				onACProfile := cfg.AutoProfile.OnAC
+				if onACProfile == "" {
+					onACProfile = config.ProfileBalanced
+				}
+
+				selected := onBatteryProfile
+				if onAC {
+					selected = onACProfile
+				}
+
+				cfg.SetProfile(selected)
+				powerSource := "battery"
+				if onAC {
+					powerSource = "AC"
+				}
+				log.Info("auto-profile event", "power_source", powerSource, "profile", string(selected))
+				if !cfg.BoostForegroundOnly {
+					engine.ThrottleAllUserBackgroundProcesses()
+				}
+			},
+			OnPowerPlanChange: func(planGUID winapi.GUID) {
+				if !cfg.RespectPowerPlan {
+					return
+				}
+				isHighPerf := planGUID == winapi.GUID_POWER_PLAN_HIGH_PERFORMANCE
+				if isHighPerf {
+					engine.SetPaused(true)
+					log.Info("power-plan event: High Performance detected, pausing throttling")
+				} else {
+					engine.SetPaused(false)
+					log.Info("power-plan event: power plan changed, resuming throttling")
+					if !cfg.BoostForegroundOnly {
+						engine.ThrottleAllUserBackgroundProcesses()
+					}
+				}
+			},
+			OnSessionChange: func(eventType uint32) {
+				if eventType == winapi.WTS_SESSION_UNLOCK || eventType == winapi.WTS_SESSION_LOGON {
+					log.Info("session change event received", "event_type", eventType)
+					if !cfg.BoostForegroundOnly {
+						engine.ThrottleAllUserBackgroundProcesses()
+					}
+				}
+			},
 		}
 
 		// Display-off → aggressive throttling when user is logged in

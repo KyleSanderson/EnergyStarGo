@@ -96,6 +96,24 @@ const (
 	WM_POWERBROADCAST           = 0x0218
 	PBT_POWERSETTINGCHANGE      = 0x8013
 	DEVICE_NOTIFY_WINDOW_HANDLE = 0x00000000
+	WM_WTSSESSION_CHANGE        = 0x02B1
+)
+
+// WTS session change notification codes
+const (
+	WTS_SESSION_LOGON          = 0x5
+	WTS_SESSION_LOGOFF         = 0x6
+	WTS_SESSION_LOCK           = 0x7
+	WTS_SESSION_UNLOCK         = 0x8
+	WTS_SESSION_REMOTE_CONTROL = 0x9
+	WTS_SESSION_CREATE         = 0xA
+	WTS_SESSION_TERMINATE      = 0xB
+)
+
+// WTS session notification flags
+const (
+	NOTIFY_FOR_THIS_SESSION = 0x0
+	NOTIFY_FOR_ALL_SESSIONS = 0x1
 )
 
 // Display power states from GUID_CONSOLE_DISPLAY_STATE
