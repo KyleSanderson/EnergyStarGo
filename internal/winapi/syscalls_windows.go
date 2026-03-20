@@ -72,6 +72,7 @@ var (
 	procGlobalMemoryStatusEx     = modkernel32.NewProc("GlobalMemoryStatusEx")
 	procGetTickCount64           = modkernel32.NewProc("GetTickCount64")
 	procSetProcessAffinityMask   = modkernel32.NewProc("SetProcessAffinityMask")
+	procWTSGetActiveConsoleSessionId = modkernel32.NewProc("WTSGetActiveConsoleSessionId")
 
 	procSetWinEventHook     = moduser32.NewProc("SetWinEventHook")
 	procUnhookWinEvent      = moduser32.NewProc("UnhookWinEvent")
@@ -326,7 +327,15 @@ func GetCurrentProcessSessionId() (uint32, error) {
 	pid := windows.GetCurrentProcessId()
 	return ProcessIdToSessionId(pid)
 }
-
+// WTSGetActiveConsoleSessionId returns the session ID of the session attached to the physical console.
+// If no session is attached, the return value is 0xFFFFFFFF.
+func WTSGetActiveConsoleSessionId() (uint32, error) {
+	ret, _, err := procWTSGetActiveConsoleSessionId.Call()
+	if ret == 0xFFFFFFFF {
+		return uint32(ret), nil
+	}
+	return uint32(ret), err
+}
 // ProcessNameFromEntry extracts the process name string from a PROCESSENTRY32W.
 func ProcessNameFromEntry(entry *PROCESSENTRY32W) string {
 	return syscall.UTF16ToString(entry.ExeFile[:])

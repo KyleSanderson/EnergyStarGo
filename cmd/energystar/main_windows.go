@@ -674,17 +674,22 @@ func cmdRun() {
 			},
 		}
 
-		// Display-off → aggressive throttling
+		// Display-off → aggressive throttling when user is logged in
 		if cfg.ThrottleOnDisplayOff {
 			var displayOffMu sync.Mutex
 			var savedProfile config.Profile
 			var displayIsOff bool
 
+			isUserSessionActive := func() bool {
+				sessionID, err := winapi.WTSGetActiveConsoleSessionId()
+				return err == nil && sessionID != 0xFFFFFFFF
+			}
+
 			callbacks.OnDisplayStateChange = func(displayOn bool) {
 				displayOffMu.Lock()
 				defer displayOffMu.Unlock()
 
-				if !displayOn && !displayIsOff {
+				if !displayOn && !displayIsOff && isUserSessionActive() {
 					displayIsOff = true
 					savedProfile = cfg.GetProfile()
 					cfg.SetProfile(config.ProfileAggressive)
@@ -692,7 +697,7 @@ func cmdRun() {
 					if !cfg.BoostForegroundOnly {
 						engine.ThrottleAllUserBackgroundProcesses()
 					}
-				} else if displayOn && displayIsOff {
+				} else if displayOn && displayIsOff && isUserSessionActive() {
 					displayIsOff = false
 					cfg.SetProfile(savedProfile)
 					log.Info("display on: restoring profile", "profile", string(savedProfile))

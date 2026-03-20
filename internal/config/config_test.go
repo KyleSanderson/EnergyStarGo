@@ -261,6 +261,12 @@ func TestProfileAggressive(t *testing.T) {
 			t.Errorf("aggressive profile should bypass %s", p)
 		}
 	}
+	// Aggressive must include added shell/Task/console processes for Windows 11 reliability
+	for _, p := range []string{"explorer.exe", "sihost.exe", "taskhostw.exe", "conhost.exe", "taskeng.exe", "fontdrvhost.exe"} {
+		if !cfg.ShouldBypass(p) {
+			t.Errorf("aggressive profile should bypass %s", p)
+		}
+	}
 	// Aggressive should throttle things the balanced profile also throttles
 	if cfg.ShouldBypass("searchindexer.exe") {
 		t.Error("aggressive profile should throttle searchindexer.exe")

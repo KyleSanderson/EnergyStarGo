@@ -190,18 +190,26 @@ var BalancedBypassProcesses = []string{
 // Only realtime / kernel-critical processes are exempted; everything else
 // (indexing, update notifications, widgets, print spooler, …) is throttled.
 var AggressiveBypassProcesses = []string{
-	"smss.exe",     // Session Manager Subsystem
-	"csrss.exe",    // Client/Server Runtime Subsystem
-	"wininit.exe",  // Windows Init
-	"winlogon.exe", // Windows Logon
-	"lsass.exe",    // Local Security Authority
-	"services.exe", // Service Control Manager
+	"energystar.exe", // Self
+	"smss.exe",      // Session Manager Subsystem
+	"csrss.exe",     // Client/Server Runtime Subsystem
+	"wininit.exe",   // Windows Init
+	"winlogon.exe",  // Windows Logon
+	"lsass.exe",     // Local Security Authority
+	"services.exe",  // Service Control Manager
 	"svchost.exe",  // Service host processes (audio, network, ...)
 	"dwm.exe",      // Desktop Window Manager
 	"audiodg.exe",  // Audio Device Graph
 	"ctfmon.exe",   // Text Services Framework / IME
 	"inputapp.exe", // Touch & pen input dispatcher
 	"lockapp.exe",  // Lock screen
+	// Additional robustness for Windows UI shell and scheduled task hosts:
+	"explorer.exe",   // Windows Explorer shell
+	"sihost.exe",     // Shell Infrastructure Host
+	"taskhostw.exe",  // Task Scheduler host
+	"conhost.exe",    // Console host (terminal windows)
+	"taskeng.exe",    // Task scheduler engine
+	"fontdrvhost.exe", // Font driver host
 }
 
 // bypassListForProfile returns the built-in bypass list for the given profile.
