@@ -67,7 +67,7 @@ const (
 
 // Thread access rights
 const (
-	THREAD_SET_INFORMATION  = 0x0020
+	THREAD_SET_INFORMATION   = 0x0020
 	THREAD_QUERY_INFORMATION = 0x0040
 )
 

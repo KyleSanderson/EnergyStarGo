@@ -248,3 +248,61 @@ func QueryStatus() (svc.Status, error) {
 
 	return s.Query()
 }
+
+// ListByState returns the names of installed Windows services whose current
+// state matches one of the provided states (e.g. svc.Stopped, svc.Paused).
+// Results are capped at 50 entries to keep the list manageable for UI display.
+func ListByState(states ...svc.State) ([]string, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to service manager: %w", err)
+	}
+	defer m.Disconnect()
+
+	names, err := m.ListServices()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list services: %w", err)
+	}
+
+	want := make(map[svc.State]struct{}, len(states))
+	for _, st := range states {
+		want[st] = struct{}{}
+	}
+
+	var result []string
+	for _, name := range names {
+		if len(result) >= 50 {
+			break
+		}
+		s, err := m.OpenService(name)
+		if err != nil {
+			continue
+		}
+		st, err := s.Query()
+		s.Close()
+		if err != nil {
+			continue
+		}
+		if _, ok := want[st.State]; ok {
+			result = append(result, name)
+		}
+	}
+	return result, nil
+}
+
+// StartByName starts the named Windows service.
+func StartByName(name string) error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("failed to connect to service manager: %w", err)
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(name)
+	if err != nil {
+		return fmt.Errorf("failed to open service %q: %w", name, err)
+	}
+	defer s.Close()
+
+	return s.Start()
+}

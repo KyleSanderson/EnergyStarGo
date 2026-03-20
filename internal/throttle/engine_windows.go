@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -220,7 +221,7 @@ func (e *Engine) HandleForegroundEvent(hwnd uintptr) {
 			winapi.PROCESS_SET_INFORMATION, false, e.pendingPID,
 		)
 		if err == nil {
-				if err := e.toggleEfficiencyMode(prevHandle, e.pendingPID, true); err == nil {
+			if err := e.toggleEfficiencyMode(prevHandle, e.pendingPID, true); err == nil {
 				e.log.Throttle(e.pendingName, e.pendingPID)
 				e.stats.IncrementThrottled()
 				e.throttledPIDs[e.pendingPID] = e.pendingName
@@ -392,7 +393,7 @@ func (e *Engine) RunMessageLoop() {
 	defer runtime.UnlockOSThread()
 
 	// Record the thread ID so Stop() can post WM_QUIT from another goroutine.
-	e.msgThreadID = winapi.GetCurrentThreadId()
+	atomic.StoreUint32(&e.msgThreadID, winapi.GetCurrentThreadId())
 
 	// Create the WinEvent callback
 	e.winEventCallback = syscall.NewCallback(func(
@@ -455,7 +456,7 @@ func (e *Engine) Stop() {
 		close(e.stopCh)
 	}
 	// Post WM_QUIT to the message loop thread so GetMessage returns 0.
-	if tid := e.msgThreadID; tid != 0 {
+	if tid := atomic.LoadUint32(&e.msgThreadID); tid != 0 {
 		winapi.PostThreadMessage(tid, winapi.WM_QUIT, 0, 0)
 	}
 }

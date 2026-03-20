@@ -27,8 +27,8 @@ const (
 
 // ScheduleEntry defines a time window with an active profile.
 type ScheduleEntry struct {
-	From    string  `json:"from"`    // 24h "HH:MM"
-	To      string  `json:"to"`      // 24h "HH:MM"
+	From    string  `json:"from"` // 24h "HH:MM"
+	To      string  `json:"to"`   // 24h "HH:MM"
 	Profile Profile `json:"profile"`
 }
 

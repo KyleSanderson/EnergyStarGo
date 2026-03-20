@@ -25,6 +25,7 @@ var (
 	procThread32Next             = modkernel32.NewProc("Thread32Next")
 	procSetThreadInformation     = modkernel32.NewProc("SetThreadInformation")
 	procOpenThread               = modkernel32.NewProc("OpenThread")
+	procSetConsoleCtrlHandler    = modkernel32.NewProc("SetConsoleCtrlHandler")
 
 	procSetWinEventHook     = moduser32.NewProc("SetWinEventHook")
 	procUnhookWinEvent      = moduser32.NewProc("UnhookWinEvent")
@@ -160,6 +161,21 @@ func PostThreadMessage(threadID uint32, msg uint32, wParam, lParam uintptr) erro
 func GetCurrentThreadId() uint32 {
 	ret, _, _ := modkernel32.NewProc("GetCurrentThreadId").Call()
 	return uint32(ret)
+}
+
+// SetConsoleCtrlHandler adds or removes an application-defined HandlerRoutine
+// function from the list of handler functions for the calling process.
+// Pass handler=0 with add=false to restore the default Ctrl+C behavior.
+func SetConsoleCtrlHandler(handler uintptr, add bool) error {
+	bAdd := uintptr(0)
+	if add {
+		bAdd = 1
+	}
+	ret, _, err := procSetConsoleCtrlHandler.Call(handler, bAdd)
+	if ret == 0 {
+		return err
+	}
+	return nil
 }
 
 // GetForegroundWindow retrieves a handle to the foreground window.

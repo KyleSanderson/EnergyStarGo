@@ -22,20 +22,25 @@ import (
 
 // Menu item IDs
 const (
-	idStatus         = 1001
-	idStats          = 1002
-	idSeparator      = 1003
-	idPause          = 1004
-	idResume         = 1005
-	idRestore        = 1006
-	idExit           = 1007
-	idSvcSeparator   = 1008
-	idInstallSvc     = 1009
-	idUninstallSvc   = 1010
-	idStartSvc       = 1011
-	idStopSvc        = 1012
-	idAutoStartSep   = 1013
+	idStatus          = 1001
+	idStats           = 1002
+	idSeparator       = 1003
+	idPause           = 1004
+	idResume          = 1005
+	idRestore         = 1006
+	idExit            = 1007
+	idSvcSeparator    = 1008
+	idInstallSvc      = 1009
+	idUninstallSvc    = 1010
+	idStartSvc        = 1011
+	idStopSvc         = 1012
+	idAutoStartSep    = 1013
 	idToggleAutoStart = 1014
+	// Sleeping-services submenu — IDs 2000–2019 (up to maxSleepSvcItems entries)
+	idSleepSvcSep    = 1998
+	idSleepSvcHeader = 1999
+	idSleepSvcBase   = 2000
+	maxSleepSvcItems = 20
 )
 
 // Win32 constants for tray
@@ -302,12 +307,15 @@ type TrayCallbacks struct {
 	OnStartService     func()
 	OnStopService      func()
 	// Returns current service state string: "Running", "Stopped", "Not installed", etc.
-	GetServiceStatus   func() string
+	GetServiceStatus func() string
 	// Auto-start at Windows login toggle
 	OnToggleAutoStart  func()
 	IsAutoStartEnabled func() bool
 	// Battery status for tray tooltip display
 	GetBatteryStatus func() string // returns e.g. "Battery: 87% (AC)" or "Battery: 45% ⚡"
+	// Sleeping/stopped system services — populated when context menu opens
+	GetSleepingServices func() []string    // returns names of stopped/paused services
+	OnWakeService       func(name string)  // called to start a sleeping service (elevates if needed)
 }
 
 // Tray manages the system tray icon.
@@ -318,6 +326,8 @@ type Tray struct {
 	nid       NOTIFYICONDATAW
 	mu        sync.Mutex
 	running   bool
+	// snapshot of sleeping service names captured when the context menu opens
+	sleepingServices []string
 }
 
 // New creates a new Tray.
@@ -577,6 +587,24 @@ func showContextMenu(t *Tray, hwnd uintptr) {
 	}
 	appendMenu(hMenu, MF_STRING, idToggleAutoStart, autoStartText)
 
+	// Sleeping / stopped system services section
+	if t.callbacks.GetSleepingServices != nil {
+		sleeping := t.callbacks.GetSleepingServices()
+		if len(sleeping) > maxSleepSvcItems {
+			sleeping = sleeping[:maxSleepSvcItems]
+		}
+		t.mu.Lock()
+		t.sleepingServices = sleeping
+		t.mu.Unlock()
+		if len(sleeping) > 0 {
+			appendMenu(hMenu, MF_SEPARATOR, idSleepSvcSep, "")
+			appendMenu(hMenu, MF_STRING|MF_GRAYED, idSleepSvcHeader, "Sleeping Services:")
+			for i, name := range sleeping {
+				appendMenu(hMenu, MF_STRING, uint32(idSleepSvcBase+i), "\u25b6 "+name)
+			}
+		}
+	}
+
 	appendMenu(hMenu, MF_SEPARATOR, idSeparator, "")
 	appendMenu(hMenu, MF_STRING, idExit, "Exit")
 
@@ -641,6 +669,22 @@ func handleMenuCommand(t *Tray, id uint32) {
 			go t.runCallback("OnExit", t.callbacks.OnExit)
 		}
 		t.Stop()
+	default:
+		// Sleeping-service range: idSleepSvcBase … idSleepSvcBase+maxSleepSvcItems-1
+		if id >= idSleepSvcBase && id < uint32(idSleepSvcBase+maxSleepSvcItems) {
+			idx := int(id - idSleepSvcBase)
+			t.mu.Lock()
+			var name string
+			if idx < len(t.sleepingServices) {
+				name = t.sleepingServices[idx]
+			}
+			t.mu.Unlock()
+			if name != "" && t.callbacks.OnWakeService != nil {
+				go t.runCallback("OnWakeService:"+name, func() {
+					t.callbacks.OnWakeService(name)
+				})
+			}
+		}
 	}
 }
 

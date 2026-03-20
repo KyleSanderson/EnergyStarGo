@@ -41,6 +41,7 @@ import (
 	"github.com/KyleSanderson/EnergyStarGo/internal/throttle"
 	"github.com/KyleSanderson/EnergyStarGo/internal/tray"
 	"github.com/KyleSanderson/EnergyStarGo/internal/uac"
+	"github.com/KyleSanderson/EnergyStarGo/internal/winapi"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 )
@@ -49,6 +50,9 @@ var (
 	Version   = "dev"
 	BuildTime = "unknown"
 	GitCommit = "unknown"
+
+	// consoleCtrlHandler holds the Win32 console ctrl callback to prevent GC.
+	consoleCtrlHandler uintptr
 )
 
 func main() {
@@ -66,9 +70,9 @@ func main() {
 
 	command := os.Args[1]
 
-	// install, uninstall, start, stop require admin privileges — auto-elevate.
+	// install, uninstall, start, stop, start-service require admin privileges — auto-elevate.
 	switch command {
-	case "install", "uninstall", "start", "stop":
+	case "install", "uninstall", "start", "stop", "start-service":
 		if !uac.IsElevated() {
 			if err := uac.Elevate(os.Args[1:]...); err != nil {
 				fmt.Fprintf(os.Stderr, "Failed to elevate: %v\n", err)
@@ -89,6 +93,8 @@ func main() {
 		cmdStart()
 	case "stop":
 		cmdStop()
+	case "start-service":
+		cmdStartService()
 	case "status":
 		cmdStatus()
 	case "config":
@@ -365,9 +371,35 @@ func cmdRun() {
 		}
 	}()
 
-	// Set up signal handling for graceful shutdown
+	// Set up signal handling for graceful shutdown.
+	// Use a shared done channel so both Go signals and the Win32 console ctrl
+	// handler can trigger the same shutdown path.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// doneCh is closed exactly once to initiate shutdown from any source.
+	doneCh := make(chan struct{})
+	var doneOnce sync.Once
+	triggerShutdown := func() { doneOnce.Do(func() { close(doneCh) }) }
+
+	go func() {
+		select {
+		case <-sigCh:
+			triggerShutdown()
+		case <-doneCh:
+		}
+	}()
+
+	// Register a Win32 console ctrl handler so Ctrl+C always works even when
+	// a window message loop is running or the process is launched from WSL/PS.
+	// The callback must be kept alive; package-level var prevents GC.
+	consoleCtrlHandler = syscall.NewCallback(func(ctrlType uint32) uintptr {
+		triggerShutdown()
+		return 1 // handled — suppress default OS termination
+	})
+	if err := winapi.SetConsoleCtrlHandler(consoleCtrlHandler, true); err != nil {
+		log.Warn("failed to register console ctrl handler", "error", err)
+	}
 
 	// Optionally start system tray
 	if *showTray {
@@ -388,10 +420,7 @@ func cmdRun() {
 				log.Info("processes restored via tray", "count", restored)
 			},
 			OnExit: func() {
-				select {
-				case sigCh <- syscall.SIGTERM:
-				default:
-				}
+				triggerShutdown()
 			},
 			GetStats: func() string {
 				s := engine.Stats()
@@ -501,6 +530,36 @@ func cmdRun() {
 				}
 				return fmt.Sprintf("%d%% (%s)", st.BatteryPercent, acStr)
 			},
+			GetSleepingServices: func() []string {
+				names, err := service.ListByState(svc.Stopped, svc.Paused)
+				if err != nil {
+					return nil
+				}
+				// Exclude the EnergyStarGo service itself from the list.
+				result := names[:0]
+				for _, n := range names {
+					if n != service.ServiceName {
+						result = append(result, n)
+					}
+				}
+				return result
+			},
+			OnWakeService: func(name string) {
+				if !uac.IsElevated() {
+					if err := uac.Elevate("start-service", name); err != nil {
+						log.Error("failed to elevate to wake service", "name", name, "error", err)
+					}
+					return
+				}
+				if err := service.StartByName(name); err != nil {
+					log.Error("failed to wake service", "name", name, "error", err)
+				} else {
+					log.Info("sleeping service started", "name", name)
+					if trayIcon != nil {
+						trayIcon.ShowNotification("EnergyStarGo", fmt.Sprintf("Service \"%s\" started", name))
+					}
+				}
+			},
 		}
 
 		trayIcon = tray.New(log, callbacks)
@@ -543,8 +602,9 @@ func cmdRun() {
 
 		// Start message loop in main goroutine
 		go func() {
-			<-sigCh
+			<-doneCh
 			log.Info("shutdown signal received")
+			winapi.SetConsoleCtrlHandler(consoleCtrlHandler, false)
 			engine.Stop()
 			trayIcon.Stop()
 			close(stopHK)
@@ -555,8 +615,9 @@ func cmdRun() {
 	} else {
 		// No tray: run message loop in main goroutine
 		go func() {
-			<-sigCh
+			<-doneCh
 			log.Info("shutdown signal received")
+			winapi.SetConsoleCtrlHandler(consoleCtrlHandler, false)
 			engine.Stop()
 			close(stopHK)
 		}()
@@ -629,6 +690,19 @@ func cmdStop() {
 		os.Exit(1)
 	}
 	fmt.Println("Service stopped.")
+}
+
+func cmdStartService() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "Usage: energystar start-service <service-name>")
+		os.Exit(1)
+	}
+	name := os.Args[2]
+	if err := service.StartByName(name); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start service %q: %v\n", name, err)
+		os.Exit(1)
+	}
+	fmt.Printf("Service %q started.\n", name)
 }
 
 func cmdStatus() {

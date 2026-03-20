@@ -17,8 +17,8 @@ import (
 
 // Entry defines a time range and the profile to activate within it.
 type Entry struct {
-	From    string         // "HH:MM" 24-hour format (inclusive)
-	To      string         // "HH:MM" 24-hour format (exclusive)
+	From    string // "HH:MM" 24-hour format (inclusive)
+	To      string // "HH:MM" 24-hour format (exclusive)
 	Profile config.Profile
 }
 

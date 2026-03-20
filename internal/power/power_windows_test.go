@@ -1,4 +1,3 @@
-package power
 // SPDX-License-Identifier: GPL-2.0-only
 // SPDX-FileCopyrightText: 2024 Kyle Sanderson <kyle@kylesanderson.dev>
 

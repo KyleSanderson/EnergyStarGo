@@ -98,7 +98,7 @@ func Elevate(args ...string) error {
 		LpVerb:       verbPtr,
 		LpFile:       exePtr,
 		LpParameters: paramsPtr,
-		NShow:        1, // SW_NORMAL
+		NShow:        0, // SW_HIDE — no console window flash for sub-commands
 	}
 	info.CbSize = uint32(unsafe.Sizeof(info))
 
