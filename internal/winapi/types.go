@@ -51,3 +51,47 @@ type THREADENTRY32 struct {
 	DeltaPri       int32
 	Flags          uint32
 }
+
+// RECT is the Win32 RECT struct.
+type RECT struct {
+	Left   int32
+	Top    int32
+	Right  int32
+	Bottom int32
+}
+
+// MONITORINFO contains information about a display monitor.
+type MONITORINFO struct {
+	CbSize    uint32
+	RcMonitor RECT
+	RcWork    RECT
+	DwFlags   uint32
+}
+
+// POWERBROADCAST_SETTING is the struct delivered via WM_POWERBROADCAST /
+// PBT_POWERSETTINGCHANGE in lParam.
+type POWERBROADCAST_SETTING struct {
+	PowerSetting [16]byte
+	DataLength   uint32
+	Data         [1]byte
+}
+
+// MEMORY_PRIORITY_INFORMATION is used with SetProcessInformation
+// for ProcessMemoryPriority class to control working set priority.
+type MEMORY_PRIORITY_INFORMATION struct {
+	MemoryPriority uint32
+}
+
+// MEMORYSTATUSEX contains information about the current state of both
+// physical and virtual memory, including extended memory.
+type MEMORYSTATUSEX struct {
+	Length               uint32
+	MemoryLoad           uint32
+	TotalPhys            uint64
+	AvailPhys            uint64
+	TotalPageFile        uint64
+	AvailPageFile        uint64
+	TotalVirtual         uint64
+	AvailVirtual         uint64
+	AvailExtendedVirtual uint64
+}

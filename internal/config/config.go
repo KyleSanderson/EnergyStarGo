@@ -92,6 +92,51 @@ type Config struct {
 	// BatteryNotifications enables balloon notifications for battery events.
 	BatteryNotifications bool `json:"battery_notifications"`
 
+	// GPUThrottling enables GPU scheduling priority throttling for background
+	// processes via D3DKMTSetProcessSchedulingPriorityClass.
+	GPUThrottling bool `json:"gpu_throttling"`
+
+	// EnableGameMode pauses throttling while a fullscreen application is in
+	// the foreground (e.g. games, media players).
+	EnableGameMode bool `json:"enable_game_mode"`
+
+	// ThrottleOnDisplayOff switches to aggressive profile when the display
+	// turns off (lid close, screen timeout, manual lock) and restores the
+	// previous profile when it comes back on. Requires --tray mode.
+	ThrottleOnDisplayOff bool `json:"throttle_on_display_off"`
+
+	// IdleAggressiveMinutes: switch to aggressive profile after this many
+	// minutes of keyboard/mouse inactivity. 0 = disabled.
+	IdleAggressiveMinutes int `json:"idle_aggressive_minutes"`
+
+	// RespectPowerPlan disables throttling when the active Windows power plan
+	// is set to "High Performance".
+	RespectPowerPlan bool `json:"respect_power_plan"`
+
+	// MemoryPressureThresholdMB pauses throttling when available physical
+	// memory drops below this many MB (throttled processes can swap more,
+	// making memory pressure worse). 0 = disabled.
+	MemoryPressureThresholdMB int `json:"memory_pressure_threshold_mb"`
+
+	// DisableInVM exits immediately when a virtual machine is detected.
+	DisableInVM bool `json:"disable_in_vm"`
+
+	// BootDelaySeconds delays throttling until this many seconds after boot.
+	// 0 = disabled.
+	BootDelaySeconds int `json:"boot_delay_seconds"`
+
+	// CustomProfiles maps profile name to a bypass process list. Allows
+	// user-defined profiles beyond the built-in "balanced" and "aggressive".
+	CustomProfiles map[string][]string `json:"custom_profiles"`
+
+	// ThrottledAffinityMask, when non-zero, sets the CPU affinity of throttled
+	// processes to this mask (e.g. 0xF0 to pin to cores 4-7). 0 = disabled.
+	ThrottledAffinityMask uint64 `json:"throttled_affinity_mask"`
+
+	// BypassWindowTitles bypasses processes whose foreground window title
+	// contains any of these substrings (case-insensitive).
+	BypassWindowTitles []string `json:"bypass_window_titles"`
+
 	// resolved bypass set (lowercase names)
 	bypassSet map[string]struct{}
 }
@@ -155,6 +200,22 @@ var BalancedBypassProcesses = []string{
 	// ── Debugging / sysadmin tools ────────────────────────────────────────
 	"procmon.exe",
 	"procmon64.exe",
+
+	// ── Audio / video / communication ─────────────────────────────────────
+	"discord.exe",
+	"teams.exe",
+	"ms-teams.exe",
+	"zoom.exe",
+	"slack.exe",
+	"skype.exe",
+	"obs64.exe",
+	"obs32.exe",
+	"vlc.exe",
+	"mpc-hc64.exe",
+	"spotify.exe",
+	"wmplayer.exe",
+	"foobar2000.exe",
+	"musicbee.exe",
 }
 
 // AggressiveBypassProcesses is the minimum list for maximum battery savings.
@@ -231,6 +292,11 @@ func DefaultAggressiveConfig() *Config {
 func (c *Config) effectiveBypassList() []string {
 	if len(c.BypassProcesses) > 0 {
 		return c.BypassProcesses
+	}
+	if c.CustomProfiles != nil {
+		if list, ok := c.CustomProfiles[string(c.Profile)]; ok {
+			return list
+		}
 	}
 	return bypassListForProfile(c.Profile)
 }

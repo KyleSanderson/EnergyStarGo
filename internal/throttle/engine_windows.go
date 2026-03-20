@@ -83,8 +83,10 @@ type Engine struct {
 	winEventCallback uintptr
 
 	// Pause state — set via SetPaused; guards throttling operations.
-	pausedMu sync.Mutex
-	paused   bool
+	pausedMu       sync.Mutex
+	paused         bool
+	manuallyPaused bool
+	gameModeActive bool
 }
 
 // New creates a new throttle engine.
@@ -107,6 +109,7 @@ func (e *Engine) Stats() Stats {
 func (e *Engine) SetPaused(paused bool) {
 	e.pausedMu.Lock()
 	e.paused = paused
+	e.manuallyPaused = paused
 	e.pausedMu.Unlock()
 }
 
@@ -119,14 +122,15 @@ func (e *Engine) IsPaused() bool {
 
 // toggleEfficiencyMode enables or disables EcoQoS for a process handle.
 func (e *Engine) toggleEfficiencyMode(hProcess windows.Handle, processID uint32, enable bool) error {
+	controlMask := uint32(winapi.PROCESS_POWER_THROTTLING_EXECUTION_SPEED | winapi.PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION)
 	var stateMask uint32
 	if enable {
-		stateMask = winapi.PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+		stateMask = controlMask
 	}
 
 	state := winapi.PROCESS_POWER_THROTTLING_STATE{
 		Version:     winapi.PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-		ControlMask: winapi.PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+		ControlMask: controlMask,
 		StateMask:   stateMask,
 	}
 
@@ -151,8 +155,30 @@ func (e *Engine) toggleEfficiencyMode(hProcess windows.Handle, processID uint32,
 		return err
 	}
 
+	// Best-effort: reduce memory working set priority
+	memPri := winapi.MEMORY_PRIORITY_INFORMATION{MemoryPriority: winapi.MEMORY_PRIORITY_NORMAL}
+	if enable {
+		memPri.MemoryPriority = winapi.MEMORY_PRIORITY_VERY_LOW
+	}
+	_ = winapi.SetProcessInformation(hProcess, winapi.ProcessMemoryPriority, unsafe.Pointer(&memPri), uint32(unsafe.Sizeof(memPri)))
+
 	// Best-effort: throttle individual threads too (improves EcoQoS effectiveness on multi-threaded apps)
 	e.throttleProcessThreads(processID, enable)
+
+	// Best-effort: set GPU scheduling priority when gpu_throttling is enabled
+	if e.cfg.GPUThrottling {
+		gpuPriority := winapi.D3DKMT_SCHEDULINGPRIORITYCLASS_NORMAL
+		if enable {
+			gpuPriority = winapi.D3DKMT_SCHEDULINGPRIORITYCLASS_IDLE
+		}
+		_ = winapi.SetProcessGPUSchedulingPriority(hProcess, uint32(gpuPriority))
+	}
+
+	// Best-effort: pin throttled processes to specific CPU cores when configured
+	if enable && e.cfg.ThrottledAffinityMask != 0 {
+		_ = winapi.SetProcessAffinityMask(hProcess, uintptr(e.cfg.ThrottledAffinityMask))
+	}
+
 	return nil
 }
 
@@ -167,6 +193,26 @@ func (e *Engine) getProcessName(hProcess windows.Handle) string {
 
 // HandleForegroundEvent processes a foreground window change event.
 func (e *Engine) HandleForegroundEvent(hwnd uintptr) {
+	if e.cfg.EnableGameMode {
+		fullscreen := winapi.IsWindowFullscreen(hwnd)
+		e.pausedMu.Lock()
+		if fullscreen && !e.gameModeActive && !e.manuallyPaused {
+			e.gameModeActive = true
+			e.paused = true
+			e.pausedMu.Unlock()
+			e.log.Info("game mode: fullscreen detected, pausing throttling")
+			return
+		} else if !fullscreen && e.gameModeActive {
+			e.gameModeActive = false
+			if !e.manuallyPaused {
+				e.paused = false
+			}
+			e.pausedMu.Unlock()
+			e.log.Info("game mode: fullscreen exited, resuming throttling")
+		} else {
+			e.pausedMu.Unlock()
+		}
+	}
 	if e.IsPaused() {
 		return
 	}
@@ -196,6 +242,17 @@ func (e *Engine) HandleForegroundEvent(hwnd uintptr) {
 	// UWP special handling: find the actual child process
 	if strings.EqualFold(appName, uwpFrameHostApp) {
 		hProcess, procID, appName = e.resolveUWPProcess(hwnd, hProcess, procID)
+	}
+
+	// Check window title bypass patterns before the main bypass check
+	if len(e.cfg.BypassWindowTitles) > 0 {
+		title := strings.ToLower(winapi.GetWindowText(hwnd))
+		for _, pattern := range e.cfg.BypassWindowTitles {
+			if strings.Contains(title, strings.ToLower(pattern)) {
+				e.cfg.AddBypassProcess(appName)
+				break
+			}
+		}
 	}
 
 	e.mu.Lock()
@@ -459,6 +516,13 @@ func (e *Engine) Stop() {
 	if tid := atomic.LoadUint32(&e.msgThreadID); tid != 0 {
 		winapi.PostThreadMessage(tid, winapi.WM_QUIT, 0, 0)
 	}
+}
+
+// ThrottledCount returns the number of currently throttled processes.
+func (e *Engine) ThrottledCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.throttledPIDs)
 }
 
 // ThrottledProcesses returns a copy of the currently throttled process map.

@@ -28,6 +28,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -43,6 +45,7 @@ import (
 	"github.com/KyleSanderson/EnergyStarGo/internal/uac"
 	"github.com/KyleSanderson/EnergyStarGo/internal/winapi"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -56,23 +59,24 @@ var (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
-	}
-
-	// Check if running as a Windows service
+	// Check if running as a Windows service FIRST — the SCM starts us with
+	// no subcommand, so we must detect this before checking os.Args.
 	isSvc, _ := svc.IsWindowsService()
 	if isSvc {
 		runAsService()
 		return
 	}
 
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
 	command := os.Args[1]
 
-	// install, uninstall, start, stop, start-service require admin privileges — auto-elevate.
+	// install, uninstall, start, stop require admin privileges — auto-elevate.
 	switch command {
-	case "install", "uninstall", "start", "stop", "start-service":
+	case "install", "uninstall", "start", "stop":
 		if !uac.IsElevated() {
 			if err := uac.Elevate(os.Args[1:]...); err != nil {
 				fmt.Fprintf(os.Stderr, "Failed to elevate: %v\n", err)
@@ -93,14 +97,14 @@ func main() {
 		cmdStart()
 	case "stop":
 		cmdStop()
-	case "start-service":
-		cmdStartService()
 	case "status":
 		cmdStatus()
 	case "config":
 		cmdConfig()
 	case "version":
 		cmdVersion()
+	case "bypass-list":
+		cmdBypassList()
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -123,6 +127,7 @@ Commands:
   stop         Stop the running service
   status       Query service status
   config       Generate default configuration file
+  bypass-list  Print the effective bypass process list
   version      Print version information
 
 Run Flags:
@@ -207,6 +212,25 @@ func cmdRun() {
 		"build", BuildTime,
 		"pid", os.Getpid(),
 	)
+
+	// ── VM detection ─────────────────────────────────────────────────────────
+	if cfg.DisableInVM && isVirtualMachine() {
+		log.Info("virtual machine detected, exiting per disable_in_vm setting")
+		return
+	}
+
+	// ── Boot delay ───────────────────────────────────────────────────────────
+	if cfg.BootDelaySeconds > 0 {
+		uptimeMs := winapi.GetTickCount64()
+		thresholdMs := uint64(cfg.BootDelaySeconds) * 1000
+		if uptimeMs < thresholdMs {
+			remaining := time.Duration(thresholdMs-uptimeMs) * time.Millisecond
+			log.Info("boot delay: waiting before starting throttling",
+				"remaining_seconds", int(remaining.Seconds()),
+				"boot_delay_seconds", cfg.BootDelaySeconds)
+			time.Sleep(remaining)
+		}
+	}
 
 	// Create throttle engine
 	engine := throttle.New(cfg, log)
@@ -331,6 +355,121 @@ func cmdRun() {
 		}()
 	}
 
+	// ── Idle-time adaptive throttling ───────────────────────────────────────
+	if cfg.IdleAggressiveMinutes > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			thresholdSec := uint32(cfg.IdleAggressiveMinutes * 60)
+			var wasIdle bool
+			var savedProfile config.Profile
+			for {
+				select {
+				case <-ticker.C:
+					idle := power.IdleSeconds() >= thresholdSec
+					if idle && !wasIdle {
+						wasIdle = true
+						savedProfile = cfg.Profile
+						cfg.Profile = config.ProfileAggressive
+						cfg.Resolve()
+						log.Info("idle-throttle: user idle, switching to aggressive profile",
+							"idle_minutes", cfg.IdleAggressiveMinutes)
+						if !cfg.BoostForegroundOnly {
+							engine.ThrottleAllUserBackgroundProcesses()
+						}
+					} else if !idle && wasIdle {
+						wasIdle = false
+						cfg.Profile = savedProfile
+						cfg.Resolve()
+						log.Info("idle-throttle: user active, restoring profile",
+							"profile", string(savedProfile))
+					}
+				case <-stopHK:
+					return
+				}
+			}
+		}()
+	}
+
+	// ── Power plan integration ───────────────────────────────────────────────
+	if cfg.RespectPowerPlan {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			var pausedByPlan bool
+			for {
+				select {
+				case <-ticker.C:
+					guid, err := winapi.GetActivePowerScheme()
+					if err != nil {
+						log.Debug("power-plan: failed to query active scheme", "error", err)
+						continue
+					}
+					isHighPerf := guid == winapi.GUID_POWER_PLAN_HIGH_PERFORMANCE
+					if isHighPerf && !pausedByPlan {
+						pausedByPlan = true
+						engine.SetPaused(true)
+						log.Info("power-plan: High Performance detected, pausing throttling")
+					} else if !isHighPerf && pausedByPlan {
+						pausedByPlan = false
+						engine.SetPaused(false)
+						log.Info("power-plan: no longer High Performance, resuming throttling")
+						if !cfg.BoostForegroundOnly {
+							engine.ThrottleAllUserBackgroundProcesses()
+						}
+					}
+				case <-stopHK:
+					return
+				}
+			}
+		}()
+	}
+
+	// ── Memory pressure awareness ───────────────────────────────────────────
+	if cfg.MemoryPressureThresholdMB > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			var memoryPaused bool
+			for {
+				select {
+				case <-ticker.C:
+					ms, err := winapi.GetMemoryStatus()
+					if err != nil {
+						log.Debug("memory-pressure: failed to query memory status", "error", err)
+						continue
+					}
+					availMB := ms.AvailPhys / (1024 * 1024)
+					belowThreshold := availMB < uint64(cfg.MemoryPressureThresholdMB)
+					if belowThreshold && !memoryPaused {
+						memoryPaused = true
+						engine.SetPaused(true)
+						log.Warn("memory-pressure: available memory below threshold, pausing throttling",
+							"avail_mb", availMB,
+							"threshold_mb", cfg.MemoryPressureThresholdMB)
+					} else if !belowThreshold && memoryPaused {
+						memoryPaused = false
+						engine.SetPaused(false)
+						log.Info("memory-pressure: memory recovered, resuming throttling",
+							"avail_mb", availMB,
+							"threshold_mb", cfg.MemoryPressureThresholdMB)
+						if !cfg.BoostForegroundOnly {
+							engine.ThrottleAllUserBackgroundProcesses()
+						}
+					}
+				case <-stopHK:
+					return
+				}
+			}
+		}()
+	}
+
 	// ── Scheduled profile switching ─────────────────────────────────────────
 	var sched *scheduler.Scheduler
 	if len(cfg.Schedule) > 0 {
@@ -372,16 +511,14 @@ func cmdRun() {
 	}()
 
 	// Set up signal handling for graceful shutdown.
-	// Use a shared done channel so both Go signals and the Win32 console ctrl
-	// handler can trigger the same shutdown path.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	// doneCh is closed exactly once to initiate shutdown from any source.
 	doneCh := make(chan struct{})
 	var doneOnce sync.Once
 	triggerShutdown := func() { doneOnce.Do(func() { close(doneCh) }) }
 
+	// Go's signal.Notify for portability (terminal SIGINT/SIGTERM).
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		select {
 		case <-sigCh:
@@ -390,16 +527,15 @@ func cmdRun() {
 		}
 	}()
 
-	// Register a Win32 console ctrl handler so Ctrl+C always works even when
-	// a window message loop is running or the process is launched from WSL/PS.
-	// The callback must be kept alive; package-level var prevents GC.
+	// Also register a direct Win32 console ctrl handler. This ensures Ctrl+C
+	// works even when window message loops might interfere with Go's signal
+	// relay. The handler returns 0 so the event also chains to Go's internal
+	// handler (belt-and-suspenders).
 	consoleCtrlHandler = syscall.NewCallback(func(ctrlType uint32) uintptr {
 		triggerShutdown()
-		return 1 // handled — suppress default OS termination
+		return 0 // let Go's runtime handler also see it
 	})
-	if err := winapi.SetConsoleCtrlHandler(consoleCtrlHandler, true); err != nil {
-		log.Warn("failed to register console ctrl handler", "error", err)
-	}
+	_ = winapi.SetConsoleCtrlHandler(consoleCtrlHandler, true)
 
 	// Optionally start system tray
 	if *showTray {
@@ -519,47 +655,56 @@ func cmdRun() {
 				enabled, _ := autostart.IsEnabled()
 				return enabled
 			},
-			GetBatteryStatus: func() string {
-				st, err := power.GetStatus()
-				if err != nil || st.BatteryPercent == 255 {
-					return ""
-				}
-				acStr := "AC"
-				if st.ACStatus == power.ACOffline {
-					acStr = "battery"
-				}
-				return fmt.Sprintf("%d%% (%s)", st.BatteryPercent, acStr)
-			},
-			GetSleepingServices: func() []string {
-				names, err := service.ListByState(svc.Stopped, svc.Paused)
-				if err != nil {
-					return nil
-				}
-				// Exclude the EnergyStarGo service itself from the list.
-				result := names[:0]
-				for _, n := range names {
-					if n != service.ServiceName {
-						result = append(result, n)
-					}
-				}
-				return result
-			},
-			OnWakeService: func(name string) {
-				if !uac.IsElevated() {
-					if err := uac.Elevate("start-service", name); err != nil {
-						log.Error("failed to elevate to wake service", "name", name, "error", err)
-					}
+			IsElevated: uac.IsElevated,
+			OnRestartElevated: func() {
+				// Re-launch with the same flags, elevated via UAC
+				args := []string{"run", "--tray"}
+				if err := uac.Elevate(args...); err != nil {
+					log.Error("failed to elevate", "error", err)
 					return
 				}
-				if err := service.StartByName(name); err != nil {
-					log.Error("failed to wake service", "name", name, "error", err)
-				} else {
-					log.Info("sleeping service started", "name", name)
-					if trayIcon != nil {
-						trayIcon.ShowNotification("EnergyStarGo", fmt.Sprintf("Service \"%s\" started", name))
-					}
+				// Elevated instance is running — shut down the current one
+				triggerShutdown()
+			},
+			OnSetProfile: func(profile string) {
+				cfg.Profile = config.Profile(profile)
+				cfg.Resolve()
+				if !cfg.BoostForegroundOnly {
+					engine.ThrottleAllUserBackgroundProcesses()
+				}
+				log.Info("profile switched via tray", "profile", profile)
+				if trayIcon != nil {
+					trayIcon.ShowNotification("EnergyStarGo", fmt.Sprintf("Profile: %s", profile))
 				}
 			},
+		}
+
+		// Display-off → aggressive throttling
+		if cfg.ThrottleOnDisplayOff {
+			var displayOffMu sync.Mutex
+			var savedProfile config.Profile
+			var displayIsOff bool
+
+			callbacks.OnDisplayStateChange = func(displayOn bool) {
+				displayOffMu.Lock()
+				defer displayOffMu.Unlock()
+
+				if !displayOn && !displayIsOff {
+					displayIsOff = true
+					savedProfile = cfg.Profile
+					cfg.Profile = config.ProfileAggressive
+					cfg.Resolve()
+					log.Info("display off: switching to aggressive profile")
+					if !cfg.BoostForegroundOnly {
+						engine.ThrottleAllUserBackgroundProcesses()
+					}
+				} else if displayOn && displayIsOff {
+					displayIsOff = false
+					cfg.Profile = savedProfile
+					cfg.Resolve()
+					log.Info("display on: restoring profile", "profile", string(savedProfile))
+				}
+			}
 		}
 
 		trayIcon = tray.New(log, callbacks)
@@ -589,10 +734,12 @@ func cmdRun() {
 						}
 						battStr = fmt.Sprintf("%d%% (%s)", st.BatteryPercent, acStr)
 					}
+					throttledCount := engine.ThrottledCount()
 					engineStatus := "Running"
 					if engine.IsPaused() {
 						engineStatus = "Paused"
 					}
+					engineStatus = fmt.Sprintf("%s | %d throttled", engineStatus, throttledCount)
 					trayIcon.UpdateStatus(engineStatus, battStr)
 				case <-stopHK:
 					return
@@ -604,7 +751,6 @@ func cmdRun() {
 		go func() {
 			<-doneCh
 			log.Info("shutdown signal received")
-			winapi.SetConsoleCtrlHandler(consoleCtrlHandler, false)
 			engine.Stop()
 			trayIcon.Stop()
 			close(stopHK)
@@ -617,7 +763,6 @@ func cmdRun() {
 		go func() {
 			<-doneCh
 			log.Info("shutdown signal received")
-			winapi.SetConsoleCtrlHandler(consoleCtrlHandler, false)
 			engine.Stop()
 			close(stopHK)
 		}()
@@ -692,19 +837,6 @@ func cmdStop() {
 	fmt.Println("Service stopped.")
 }
 
-func cmdStartService() {
-	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: energystar start-service <service-name>")
-		os.Exit(1)
-	}
-	name := os.Args[2]
-	if err := service.StartByName(name); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start service %q: %v\n", name, err)
-		os.Exit(1)
-	}
-	fmt.Printf("Service %q started.\n", name)
-}
-
 func cmdStatus() {
 	status, err := service.QueryStatus()
 	if err != nil {
@@ -764,6 +896,21 @@ func cmdVersion() {
 	fmt.Printf("  Commit:   %s\n", GitCommit)
 	fmt.Printf("  Go:       %s\n", runtime.Version())
 	fmt.Printf("  OS/Arch:  %s/%s\n", runtime.GOOS, runtime.GOARCH)
+}
+
+func cmdBypassList() {
+	cfg := config.DefaultConfig()
+	cfgPath := config.DefaultConfigPath()
+	if loaded, err := config.LoadFromFile(cfgPath); err == nil {
+		cfg = loaded
+	}
+	fmt.Printf("Profile: %s\n", cfg.Profile)
+	list := cfg.BypassList()
+	sort.Strings(list)
+	fmt.Printf("Bypass list (%d processes):\n", len(list))
+	for _, p := range list {
+		fmt.Printf("  %s\n", p)
+	}
 }
 
 func runAsService() {
@@ -848,6 +995,27 @@ func splitAndTrim(s string) []string {
 		}
 	}
 	return result
+}
+
+func isVirtualMachine() bool {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SYSTEM\CurrentControlSet\Control\SystemInformation`, registry.READ)
+	if err != nil {
+		return false
+	}
+	defer key.Close()
+
+	manufacturer, _, _ := key.GetStringValue("SystemManufacturer")
+	product, _, _ := key.GetStringValue("SystemProductName")
+	combined := strings.ToLower(manufacturer + " " + product)
+
+	vmIndicators := []string{"vmware", "virtual", "virtualbox", "qemu", "xen", "hyper-v", "innotek"}
+	for _, indicator := range vmIndicators {
+		if strings.Contains(combined, indicator) {
+			return true
+		}
+	}
+	return false
 }
 
 func splitString(s string, sep byte) []string {

@@ -7,17 +7,17 @@
 package tray
 
 import (
-	"context"
 	"fmt"
 	"runtime"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 
 	"github.com/KyleSanderson/EnergyStarGo/internal/logger"
+	"github.com/KyleSanderson/EnergyStarGo/internal/winapi"
 )
 
 // Menu item IDs
@@ -36,11 +36,12 @@ const (
 	idStopSvc         = 1012
 	idAutoStartSep    = 1013
 	idToggleAutoStart = 1014
-	// Sleeping-services submenu — IDs 2000–2019 (up to maxSleepSvcItems entries)
-	idSleepSvcSep    = 1998
-	idSleepSvcHeader = 1999
-	idSleepSvcBase   = 2000
-	maxSleepSvcItems = 20
+	idElevateSep      = 1015
+	idRestartElevated = 1016
+	idPresetsSep      = 1017
+	idPresetBattery   = 1018
+	idPresetBalanced  = 1019
+	idPresetPerf      = 1020
 )
 
 // Win32 constants for tray
@@ -190,8 +191,25 @@ type BITMAPINFOHEADER struct {
 	BiClrImportant  uint32
 }
 
-// createAppIcon creates a simple 16x16 ARGB icon with a green lightning bolt
-// on a dark background, suitable for the system tray.
+// isLightTheme reads the Windows personalization registry key to detect whether
+// the system is using a light taskbar theme.
+func isLightTheme() bool {
+	key, err := registry.OpenKey(registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`,
+		registry.QUERY_VALUE)
+	if err != nil {
+		return false
+	}
+	defer key.Close()
+	val, _, err := key.GetIntegerValue("SystemUsesLightTheme")
+	if err != nil {
+		return false
+	}
+	return val == 1
+}
+
+// createAppIcon creates a simple 16x16 ARGB icon with a green lightning bolt.
+// The colors adapt to the current Windows theme (light or dark taskbar).
 func createAppIcon() uintptr {
 	const size = 16
 
@@ -263,15 +281,23 @@ func createAppIcon() uintptr {
 		{0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 	}
 
+	// Pick colours based on system theme
+	var boltColor, bgColor [4]byte
+	if isLightTheme() {
+		boltColor = [4]byte{0x20, 0x80, 0x00, 0xFF} // dark green BGRA
+		bgColor = [4]byte{0xF0, 0xF0, 0xF0, 0xFF}   // light background BGRA
+	} else {
+		boltColor = [4]byte{0x00, 0xCC, 0x44, 0xFF} // bright green BGRA
+		bgColor = [4]byte{0x30, 0x30, 0x30, 0xFF}   // dark background BGRA
+	}
+
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
 			idx := y*size + x
 			if bolt[y][x] == 1 {
-				// Green lightning bolt: BGRA
-				pixels[idx] = [4]byte{0x00, 0xCC, 0x44, 0xFF}
+				pixels[idx] = boltColor
 			} else {
-				// Dark background: BGRA
-				pixels[idx] = [4]byte{0x30, 0x30, 0x30, 0xFF}
+				pixels[idx] = bgColor
 			}
 			// Mask: all zeros = opaque
 			maskPixels[idx] = [4]byte{0x00, 0x00, 0x00, 0x00}
@@ -311,11 +337,13 @@ type TrayCallbacks struct {
 	// Auto-start at Windows login toggle
 	OnToggleAutoStart  func()
 	IsAutoStartEnabled func() bool
-	// Battery status for tray tooltip display
-	GetBatteryStatus func() string // returns e.g. "Battery: 87% (AC)" or "Battery: 45% ⚡"
-	// Sleeping/stopped system services — populated when context menu opens
-	GetSleepingServices func() []string    // returns names of stopped/paused services
-	OnWakeService       func(name string)  // called to start a sleeping service (elevates if needed)
+	// UAC elevation
+	IsElevated        func() bool
+	OnRestartElevated func()
+	// Display state change — called when screen turns on/off
+	OnDisplayStateChange func(displayOn bool)
+	// Profile preset selection from tray menu
+	OnSetProfile func(profile string)
 }
 
 // Tray manages the system tray icon.
@@ -326,8 +354,6 @@ type Tray struct {
 	nid       NOTIFYICONDATAW
 	mu        sync.Mutex
 	running   bool
-	// snapshot of sleeping service names captured when the context menu opens
-	sleepingServices []string
 }
 
 // New creates a new Tray.
@@ -404,6 +430,16 @@ func (t *Tray) Run() error {
 	t.mu.Lock()
 	t.running = true
 	t.mu.Unlock()
+
+	// Register for display power state notifications if a callback is set.
+	if t.callbacks.OnDisplayStateChange != nil {
+		guid := winapi.GUID_CONSOLE_DISPLAY_STATE
+		if h, err := winapi.RegisterPowerSettingNotification(t.hwnd, &guid, winapi.DEVICE_NOTIFY_WINDOW_HANDLE); err != nil {
+			t.log.Warn("failed to register display state notification", "error", err)
+		} else {
+			t.log.Info("display state notification registered", "handle", h)
+		}
+	}
 
 	t.log.Info("system tray icon initialized")
 
@@ -503,6 +539,19 @@ func trayWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		procDestroyWindow.Call(hwnd)
 		return 0
 
+	case winapi.WM_POWERBROADCAST:
+		if wParam == winapi.PBT_POWERSETTINGCHANGE && t.callbacks.OnDisplayStateChange != nil {
+			// lParam is a kernel-provided pointer to POWERBROADCAST_SETTING,
+			// valid for the duration of this wndproc call. The uintptr→Pointer
+			// conversion triggers go vet but is correct for Win32 callbacks.
+			pbs := (*winapi.POWERBROADCAST_SETTING)(unsafe.Pointer(lParam))
+			if pbs.DataLength >= 1 {
+				state := pbs.Data[0]
+				t.callbacks.OnDisplayStateChange(state != winapi.DISPLAY_OFF)
+			}
+		}
+		return 0
+
 	case WM_DESTROY:
 		procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&t.nid)))
 		procPostQuitMessage.Call(0)
@@ -520,7 +569,7 @@ func showContextMenu(t *Tray, hwnd uintptr) {
 	}
 	defer procDestroyMenu.Call(hMenu)
 
-	// Status line (grayed)
+	// Status line (grayed) — IsPaused is cheap (mutex read)
 	isPaused := false
 	if t.callbacks.IsPaused != nil {
 		isPaused = t.callbacks.IsPaused()
@@ -550,6 +599,8 @@ func showContextMenu(t *Tray, hwnd uintptr) {
 	// Service management section
 	appendMenu(hMenu, MF_SEPARATOR, idSvcSeparator, "")
 
+	// Service status is queried once, inline — the SCM query is fast for a
+	// single named service.
 	svcStatus := ""
 	if t.callbacks.GetServiceStatus != nil {
 		svcStatus = t.callbacks.GetServiceStatus()
@@ -587,22 +638,19 @@ func showContextMenu(t *Tray, hwnd uintptr) {
 	}
 	appendMenu(hMenu, MF_STRING, idToggleAutoStart, autoStartText)
 
-	// Sleeping / stopped system services section
-	if t.callbacks.GetSleepingServices != nil {
-		sleeping := t.callbacks.GetSleepingServices()
-		if len(sleeping) > maxSleepSvcItems {
-			sleeping = sleeping[:maxSleepSvcItems]
-		}
-		t.mu.Lock()
-		t.sleepingServices = sleeping
-		t.mu.Unlock()
-		if len(sleeping) > 0 {
-			appendMenu(hMenu, MF_SEPARATOR, idSleepSvcSep, "")
-			appendMenu(hMenu, MF_STRING|MF_GRAYED, idSleepSvcHeader, "Sleeping Services:")
-			for i, name := range sleeping {
-				appendMenu(hMenu, MF_STRING, uint32(idSleepSvcBase+i), "\u25b6 "+name)
-			}
-		}
+	appendMenu(hMenu, MF_SEPARATOR, idPresetsSep, "")
+	appendMenu(hMenu, MF_STRING, idPresetBattery, "Profile: Battery Saver")
+	appendMenu(hMenu, MF_STRING, idPresetBalanced, "Profile: Balanced")
+	appendMenu(hMenu, MF_STRING, idPresetPerf, "Profile: Performance")
+
+	// "Restart Elevated" option — only shown when not already admin
+	isElev := false
+	if t.callbacks.IsElevated != nil {
+		isElev = t.callbacks.IsElevated()
+	}
+	if !isElev {
+		appendMenu(hMenu, MF_SEPARATOR, idElevateSep, "")
+		appendMenu(hMenu, MF_STRING, idRestartElevated, "Restart Elevated (Admin)")
 	}
 
 	appendMenu(hMenu, MF_SEPARATOR, idSeparator, "")
@@ -625,86 +673,64 @@ func showContextMenu(t *Tray, hwnd uintptr) {
 	}
 }
 
-// callbackTimeout is the maximum duration for any tray callback.
-const callbackTimeout = 1 * time.Second
-
 func handleMenuCommand(t *Tray, id uint32) {
 	switch id {
 	case idPause:
 		if t.callbacks.OnPause != nil {
-			go t.runCallback("OnPause", t.callbacks.OnPause)
+			go t.callbacks.OnPause()
 			t.UpdateTooltip("EnergyStarGo - Paused")
 		}
 	case idResume:
 		if t.callbacks.OnResume != nil {
-			go t.runCallback("OnResume", t.callbacks.OnResume)
+			go t.callbacks.OnResume()
 			t.UpdateTooltip("EnergyStarGo - Running")
 		}
 	case idRestore:
 		if t.callbacks.OnRestore != nil {
-			go t.runCallback("OnRestore", t.callbacks.OnRestore)
+			go t.callbacks.OnRestore()
 		}
 	case idInstallSvc:
 		if t.callbacks.OnInstallService != nil {
-			go t.runCallback("OnInstallService", t.callbacks.OnInstallService)
+			go t.callbacks.OnInstallService()
 		}
 	case idUninstallSvc:
 		if t.callbacks.OnUninstallService != nil {
-			go t.runCallback("OnUninstallService", t.callbacks.OnUninstallService)
+			go t.callbacks.OnUninstallService()
 		}
 	case idStartSvc:
 		if t.callbacks.OnStartService != nil {
-			go t.runCallback("OnStartService", t.callbacks.OnStartService)
+			go t.callbacks.OnStartService()
 		}
 	case idStopSvc:
 		if t.callbacks.OnStopService != nil {
-			go t.runCallback("OnStopService", t.callbacks.OnStopService)
+			go t.callbacks.OnStopService()
 		}
 	case idToggleAutoStart:
 		if t.callbacks.OnToggleAutoStart != nil {
-			go t.runCallback("OnToggleAutoStart", t.callbacks.OnToggleAutoStart)
+			go t.callbacks.OnToggleAutoStart()
+		}
+	case idRestartElevated:
+		if t.callbacks.OnRestartElevated != nil {
+			go t.callbacks.OnRestartElevated()
+		}
+	case idPresetBattery:
+		if t.callbacks.OnSetProfile != nil {
+			go t.callbacks.OnSetProfile("aggressive")
+		}
+	case idPresetBalanced:
+		if t.callbacks.OnSetProfile != nil {
+			go t.callbacks.OnSetProfile("balanced")
+		}
+	case idPresetPerf:
+		if t.callbacks.OnPause != nil {
+			go t.callbacks.OnPause()
+			t.UpdateTooltip("EnergyStarGo - Paused (Performance)")
 		}
 	case idExit:
 		if t.callbacks.OnExit != nil {
-			go t.runCallback("OnExit", t.callbacks.OnExit)
+			go t.callbacks.OnExit()
 		}
 		t.Stop()
-	default:
-		// Sleeping-service range: idSleepSvcBase … idSleepSvcBase+maxSleepSvcItems-1
-		if id >= idSleepSvcBase && id < uint32(idSleepSvcBase+maxSleepSvcItems) {
-			idx := int(id - idSleepSvcBase)
-			t.mu.Lock()
-			var name string
-			if idx < len(t.sleepingServices) {
-				name = t.sleepingServices[idx]
-			}
-			t.mu.Unlock()
-			if name != "" && t.callbacks.OnWakeService != nil {
-				go t.runCallback("OnWakeService:"+name, func() {
-					t.callbacks.OnWakeService(name)
-				})
-			}
-		}
-	}
-}
-
-// runCallback executes a callback with a timeout. If the callback takes longer
-// than callbackTimeout, the context is cancelled and an error is logged.
-func (t *Tray) runCallback(name string, fn func()) {
-	ctx, cancel := context.WithTimeout(context.Background(), callbackTimeout)
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		fn()
-	}()
-
-	select {
-	case <-done:
-		// Callback completed in time.
-	case <-ctx.Done():
-		t.log.Error("tray callback timed out", "callback", name, "timeout", callbackTimeout.String())
 	}
 }
 

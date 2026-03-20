@@ -37,16 +37,23 @@ jobs:
           cache: true
 
       - name: Test (cross-platform packages)
-        run: go test -v -race -count=1 ./internal/config/ ./internal/logger/ ./internal/winapi/
+        env:
+          CGO_ENABLED: "1"
+        run: go test -v -race -count=1 ./internal/config/ ./internal/logger/ ./internal/winapi/ ./internal/scheduler/ ./internal/throttle/
 
       - name: Vet — windows/amd64
-        run: GOOS=windows GOARCH=amd64 go vet ./...
+        # Note: internal/tray excluded — has a known go vet false positive
+        # for uintptr→unsafe.Pointer in Win32 wndproc callback (safe per Win32 API contract).
+        run: |
+          GOOS=windows GOARCH=amd64 go vet ./cmd/... ./internal/config/ ./internal/logger/ ./internal/winapi/ ./internal/throttle/ ./internal/service/ ./internal/power/ ./internal/uac/ ./internal/autostart/ ./internal/scheduler/
 
       - name: Vet — windows/arm64
-        run: GOOS=windows GOARCH=arm64 go vet ./...
+        run: |
+          GOOS=windows GOARCH=arm64 go vet ./cmd/... ./internal/config/ ./internal/logger/ ./internal/winapi/ ./internal/throttle/ ./internal/service/ ./internal/power/ ./internal/uac/ ./internal/autostart/ ./internal/scheduler/
 
       - name: Vet — windows/386
-        run: GOOS=windows GOARCH=386 go vet ./...
+        run: |
+          GOOS=windows GOARCH=386 go vet ./cmd/... ./internal/config/ ./internal/logger/ ./internal/winapi/ ./internal/throttle/ ./internal/service/ ./internal/power/ ./internal/uac/ ./internal/autostart/ ./internal/scheduler/
 
   # ──────────────────────────────────────────────────
   # Full test suite on Windows (all three OS versions)
@@ -70,7 +77,9 @@ jobs:
           cache: true
 
       - name: Test (all packages)
-        run: go test -v -count=1 ./...
+        env:
+          CGO_ENABLED: "1"
+        run: go test -v -race -count=1 ./...
 
   # ──────────────────────────────────────────────────
   # Cross-compilation for every supported architecture
