@@ -17,6 +17,7 @@ import (
 // Logger wraps zerolog.Logger with application-specific methods.
 type Logger struct {
 	zl zerolog.Logger
+	file *os.File // non-nil if logging to file
 }
 
 // New creates a new Logger. If logFile is non-empty, logs are written to both
@@ -37,16 +38,28 @@ func New(logFile string, level string) (*Logger, error) {
 	consoleWriter := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
 
 	var w io.Writer = consoleWriter
+	var file *os.File
 	if logFile != "" {
 		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return nil, err
 		}
 		w = io.MultiWriter(consoleWriter, f)
+		file = f
 	}
 
 	zl := zerolog.New(w).With().Timestamp().Logger().Level(lvl)
-	return &Logger{zl: zl}, nil
+	return &Logger{zl: zl, file: file}, nil
+}
+
+// Close closes the log file if one was opened.
+func (l *Logger) Close() error {
+	if l.file != nil {
+		err := l.file.Close()
+		l.file = nil
+		return err
+	}
+	return nil
 }
 
 // Info logs an info-level message with optional key-value pairs.

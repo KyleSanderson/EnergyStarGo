@@ -31,22 +31,23 @@ func TestNewLogger_WithFile(t *testing.T) {
 		t.Fatal("logger should not be nil")
 	}
 
-	// Write a log message
-	log.Info("test message", "key", "value")
+	   // Write a log message
+	   log.Info("test message", "key", "value")
+	   log.Close()
 
-	// Verify file was created
-	if _, err := os.Stat(logFile); os.IsNotExist(err) {
-		t.Error("log file was not created")
-	}
+	   // Verify file was created
+	   if _, err := os.Stat(logFile); os.IsNotExist(err) {
+		   t.Error("log file was not created")
+	   }
 
-	// Verify file has content
-	data, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("failed to read log file: %v", err)
-	}
-	if len(data) == 0 {
-		t.Error("log file should have content")
-	}
+	   // Verify file has content
+	   data, err := os.ReadFile(logFile)
+	   if err != nil {
+		   t.Fatalf("failed to read log file: %v", err)
+	   }
+	   if len(data) == 0 {
+		   t.Error("log file should have content")
+	   }
 }
 
 func TestNewLogger_InvalidPath(t *testing.T) {
@@ -80,13 +81,14 @@ func TestThrottleLog(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 
-	log.Throttle("notepad.exe", 1234)
+	   log.Throttle("notepad.exe", 1234)
+	   log.Close()
 
-	data, _ := os.ReadFile(logFile)
-	content := string(data)
-	if len(content) == 0 {
-		t.Error("expected throttle log entry")
-	}
+	   data, _ := os.ReadFile(logFile)
+	   content := string(data)
+	   if len(content) == 0 {
+		   t.Error("expected throttle log entry")
+	   }
 }
 
 func TestBoostLog(t *testing.T) {
@@ -98,13 +100,14 @@ func TestBoostLog(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 
-	log.Boost("chrome.exe", 5678)
+	   log.Boost("chrome.exe", 5678)
+	   log.Close()
 
-	data, _ := os.ReadFile(logFile)
-	content := string(data)
-	if len(content) == 0 {
-		t.Error("expected boost log entry")
-	}
+	   data, _ := os.ReadFile(logFile)
+	   content := string(data)
+	   if len(content) == 0 {
+		   t.Error("expected boost log entry")
+	   }
 }
 
 func TestHousekeepingLog(t *testing.T) {
@@ -116,13 +119,14 @@ func TestHousekeepingLog(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 
-	log.Housekeeping(42)
+	   log.Housekeeping(42)
+	   log.Close()
 
-	data, _ := os.ReadFile(logFile)
-	content := string(data)
-	if len(content) == 0 {
-		t.Error("expected housekeeping log entry")
-	}
+	   data, _ := os.ReadFile(logFile)
+	   content := string(data)
+	   if len(content) == 0 {
+		   t.Error("expected housekeeping log entry")
+	   }
 }
 
 func TestForegroundChangeLog_DebugLevel(t *testing.T) {
@@ -135,13 +139,14 @@ func TestForegroundChangeLog_DebugLevel(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 
-	log.ForegroundChange("notepad.exe", 1234)
+	   log.ForegroundChange("notepad.exe", 1234)
+	   log.Close()
 
-	data, _ := os.ReadFile(logFile)
-	content := string(data)
-	if len(content) == 0 {
-		t.Error("expected foreground change log entry at debug level")
-	}
+	   data, _ := os.ReadFile(logFile)
+	   content := string(data)
+	   if len(content) == 0 {
+		   t.Error("expected foreground change log entry at debug level")
+	   }
 }
 
 func TestForegroundChangeLog_InfoLevel(t *testing.T) {
@@ -154,13 +159,14 @@ func TestForegroundChangeLog_InfoLevel(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 
-	log.ForegroundChange("notepad.exe", 1234)
+	   log.ForegroundChange("notepad.exe", 1234)
+	   log.Close()
 
-	data, _ := os.ReadFile(logFile)
-	content := string(data)
-	if len(content) != 0 {
-		t.Error("foreground change should not appear at info level")
-	}
+	   data, _ := os.ReadFile(logFile)
+	   content := string(data)
+	   if len(content) != 0 {
+		   t.Error("foreground change should not appear at info level")
+	   }
 }
 
 func TestLogFileAppend(t *testing.T) {
@@ -168,24 +174,26 @@ func TestLogFileAppend(t *testing.T) {
 	logFile := filepath.Join(dir, "append.log")
 
 	// Write first entry
-	log1, err := New(logFile, "info")
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	log1.Info("message1")
+	   log1, err := New(logFile, "info")
+	   if err != nil {
+		   t.Fatalf("New failed: %v", err)
+	   }
+	   log1.Info("message1")
+	   log1.Close()
 
-	data1, _ := os.ReadFile(logFile)
-	len1 := len(data1)
+	   data1, _ := os.ReadFile(logFile)
+	   len1 := len(data1)
 
-	// Open again and write second entry
-	log2, err := New(logFile, "info")
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	log2.Info("message2")
+	   // Open again and write second entry
+	   log2, err := New(logFile, "info")
+	   if err != nil {
+		   t.Fatalf("New failed: %v", err)
+	   }
+	   log2.Info("message2")
+	   log2.Close()
 
-	data2, _ := os.ReadFile(logFile)
-	if len(data2) <= len1 {
-		t.Error("second write should have appended to log file")
-	}
+	   data2, _ := os.ReadFile(logFile)
+	   if len(data2) <= len1 {
+		   t.Error("second write should have appended to log file")
+	   }
 }
