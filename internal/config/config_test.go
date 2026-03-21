@@ -243,8 +243,8 @@ func TestProfileBalancedDefault(t *testing.T) {
 	if cfg.Profile != ProfileBalanced {
 		t.Errorf("expected default profile=%s, got %s", ProfileBalanced, cfg.Profile)
 	}
-	// Balanced must include audio, input, and lock logon UI
-	for _, p := range []string{"audiodg.exe", "dwm.exe", "ctfmon.exe", "explorer.exe", "lockapp.exe", "logonui.exe"} {
+	// Balanced must include audio, input, shell, and lock/logon UI
+	for _, p := range []string{"audiodg.exe", "dwm.exe", "ctfmon.exe", "explorer.exe", "lockapp.exe", "logonui.exe", "sihost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "searchhost.exe", "searchui.exe", "searchapp.exe"} {
 		if !cfg.ShouldBypass(p) {
 			t.Errorf("balanced profile should bypass %s", p)
 		}
@@ -267,7 +267,7 @@ func TestProfileAggressive(t *testing.T) {
 		}
 	}
 	// Aggressive must include added shell/Task/console processes for Windows 11 reliability
-	for _, p := range []string{"explorer.exe", "sihost.exe", "taskhostw.exe", "conhost.exe", "taskeng.exe", "fontdrvhost.exe"} {
+	for _, p := range []string{"explorer.exe", "sihost.exe", "taskhostw.exe", "conhost.exe", "taskeng.exe", "fontdrvhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "searchhost.exe", "searchui.exe", "searchapp.exe"} {
 		if !cfg.ShouldBypass(p) {
 			t.Errorf("aggressive profile should bypass %s", p)
 		}

@@ -161,6 +161,8 @@ var BalancedBypassProcesses = []string{
 	"startmenuexperiencehost.exe", // Start menu
 	"applicationframehost.exe",    // UWP app container
 	"searchhost.exe",              // Start menu search
+	"searchui.exe",                // Windows 10 search UI host
+	"searchapp.exe",               // Windows 11 search app host
 	"sihost.exe",                  // Shell Infrastructure (system tray)
 	"runtimebroker.exe",           // App activation & permission brokering
 	"taskhostw.exe",               // Task Scheduler host
@@ -220,6 +222,8 @@ var AggressiveBypassProcesses = []string{
 	"startmenuexperiencehost.exe", // Start Menu Experience Host
 	"applicationframehost.exe",    // UWP app container host
 	"searchhost.exe",              // Start menu search host
+	"searchui.exe",                // Windows 10 search UI host
+	"searchapp.exe",               // Windows 11 search app host
 }
 
 // bypassListForProfile returns the built-in bypass list for the given profile.
