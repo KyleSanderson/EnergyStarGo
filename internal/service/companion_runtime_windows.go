@@ -69,7 +69,8 @@ func newCompanionRuntime(log *logger.Logger, receiver foregroundPIDReceiver, ser
 
 func (c *companionRuntime) Start() {
 	go c.serveForegroundPipe()
-	c.EnsureActiveSessionCompanion()
+	go c.monitorSessions()
+	c.EnsureCompanionsForActiveSessions()
 }
 
 func (c *companionRuntime) Stop() {
@@ -91,10 +92,31 @@ func (c *companionRuntime) EnsureActiveSessionCompanion() {
 		c.log.Debug("no active console session available for companion")
 		return
 	}
+	c.EnsureSessionCompanion(sessionID)
+}
+
+func (c *companionRuntime) EnsureSessionCompanion(sessionID uint32) {
+	if sessionID == noActiveConsoleSession {
+		return
+	}
 	c.ensureCompanionForSession(sessionID)
 }
 
+func (c *companionRuntime) EnsureCompanionsForActiveSessions() {
+	sessionIDs, err := activeSessionIDs()
+	if err != nil {
+		c.log.Debug("failed to enumerate active sessions for companion", "error", err)
+		c.EnsureActiveSessionCompanion()
+		return
+	}
+	c.ensureCompanionsForSessions(sessionIDs)
+}
+
 func (c *companionRuntime) ensureCompanionForSession(sessionID uint32) {
+	if c.isStopping() {
+		return
+	}
+
 	c.mu.Lock()
 	existing, ok := c.companionBySession[sessionID]
 	if ok && processHandleRunning(existing) {
@@ -128,6 +150,47 @@ func (c *companionRuntime) ensureCompanionForSession(sessionID uint32) {
 	c.log.Info("companion started", "session_id", sessionID, "pid", pid)
 }
 
+func (c *companionRuntime) StopSessionCompanion(sessionID uint32) {
+	if sessionID == noActiveConsoleSession {
+		return
+	}
+	handle := c.removeCompanionHandle(sessionID)
+	if handle == 0 {
+		return
+	}
+	if processHandleRunning(handle) {
+		_ = windows.TerminateProcess(handle, 0)
+	}
+	_ = windows.CloseHandle(handle)
+	c.log.Debug("companion stopped for session", "session_id", sessionID)
+}
+
+func (c *companionRuntime) ensureCompanionsForSessions(sessionIDs []uint32) {
+	desired := make(map[uint32]struct{}, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		if sessionID == noActiveConsoleSession {
+			continue
+		}
+		desired[sessionID] = struct{}{}
+		c.EnsureSessionCompanion(sessionID)
+	}
+	c.stopCompanionsOutside(desired)
+}
+
+func (c *companionRuntime) monitorSessions() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.EnsureCompanionsForActiveSessions()
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
 func (c *companionRuntime) stopCompanions() {
 	c.mu.Lock()
 	procs := c.companionBySession
@@ -141,6 +204,38 @@ func (c *companionRuntime) stopCompanions() {
 		_ = windows.TerminateProcess(handle, 0)
 		_ = windows.CloseHandle(handle)
 		c.log.Debug("companion stopped", "session_id", sessionID)
+	}
+}
+
+func (c *companionRuntime) removeCompanionHandle(sessionID uint32) windows.Handle {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	handle := c.companionBySession[sessionID]
+	delete(c.companionBySession, sessionID)
+	return handle
+}
+
+func (c *companionRuntime) stopCompanionsOutside(desired map[uint32]struct{}) {
+	c.mu.Lock()
+	stale := make(map[uint32]windows.Handle)
+	for sessionID, handle := range c.companionBySession {
+		if _, ok := desired[sessionID]; ok {
+			continue
+		}
+		stale[sessionID] = handle
+		delete(c.companionBySession, sessionID)
+	}
+	c.mu.Unlock()
+
+	for sessionID, handle := range stale {
+		if handle == 0 {
+			continue
+		}
+		if processHandleRunning(handle) {
+			_ = windows.TerminateProcess(handle, 0)
+		}
+		_ = windows.CloseHandle(handle)
+		c.log.Debug("companion pruned for inactive session", "session_id", sessionID)
 	}
 }
 
@@ -183,6 +278,11 @@ func (c *companionRuntime) serveForegroundPipe() {
 			continue
 		}
 
+		if c.isStopping() {
+			_ = windows.CloseHandle(handle)
+			return
+		}
+
 		err = windows.ConnectNamedPipe(handle, nil)
 		if err != nil && !errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
 			_ = windows.CloseHandle(handle)
@@ -197,19 +297,42 @@ func (c *companionRuntime) serveForegroundPipe() {
 		c.readForegroundPipe(handle)
 		_ = windows.DisconnectNamedPipe(handle)
 		_ = windows.CloseHandle(handle)
+		if c.isStopping() {
+			return
+		}
+		c.EnsureActiveSessionCompanion()
 	}
 }
 
 func (c *companionRuntime) readForegroundPipe(handle windows.Handle) {
 	var payload [4]byte
+	var scratch [64]byte
 	for {
 		if c.isStopping() {
 			return
 		}
 
-		var read uint32
-		err := windows.ReadFile(handle, payload[:], &read, nil)
-		if err != nil {
+		msg := payload[:0]
+		malformed := false
+
+		for {
+			var read uint32
+			err := windows.ReadFile(handle, scratch[:], &read, nil)
+			if read > 0 {
+				if !malformed && len(msg)+int(read) <= len(payload) {
+					msg = append(msg, scratch[:read]...)
+				} else {
+					malformed = true
+				}
+			}
+
+			if err == nil {
+				break
+			}
+			if errors.Is(err, windows.ERROR_MORE_DATA) {
+				malformed = true
+				continue
+			}
 			if errors.Is(err, windows.ERROR_BROKEN_PIPE) ||
 				errors.Is(err, windows.ERROR_NO_DATA) ||
 				errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED) {
@@ -222,7 +345,12 @@ func (c *companionRuntime) readForegroundPipe(handle windows.Handle) {
 			return
 		}
 
-		pid, err := foregroundipc.DecodePID(payload[:read])
+		if malformed || len(msg) != len(payload) {
+			c.log.Debug("ignoring malformed foreground payload", "bytes_read", len(msg))
+			continue
+		}
+
+		pid, err := foregroundipc.DecodePID(msg)
 		if err != nil {
 			c.log.Debug("ignoring malformed foreground payload", "error", err)
 			continue
@@ -265,6 +393,26 @@ func processHandleRunning(handle windows.Handle) bool {
 	}
 	status, err := windows.WaitForSingleObject(handle, 0)
 	return err == nil && status == uint32(windows.WAIT_TIMEOUT)
+}
+
+func activeSessionIDs() ([]uint32, error) {
+	var (
+		sessions *windows.WTS_SESSION_INFO
+		count    uint32
+	)
+	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
+		return nil, err
+	}
+	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
+
+	out := make([]uint32, 0, count)
+	all := unsafe.Slice(sessions, count)
+	for _, session := range all {
+		if session.State == windows.WTSActive {
+			out = append(out, session.SessionID)
+		}
+	}
+	return out, nil
 }
 
 func spawnCompanionAsUser(exePath string, serviceArgs []string, sessionID uint32) (windows.Handle, error) {

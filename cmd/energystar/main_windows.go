@@ -239,6 +239,19 @@ func cmdRun() {
 	// Create throttle engine
 	engine := throttle.New(cfg, log)
 
+	// Respect current power plan immediately on startup so we do not wait for
+	// the next WM_POWERBROADCAST event.
+	if cfg.RespectPowerPlan {
+		if planGUID, err := winapi.GetActivePowerScheme(); err != nil {
+			log.Debug("failed to read active power plan", "error", err)
+		} else if planGUID == winapi.GUID_POWER_PLAN_HIGH_PERFORMANCE {
+			engine.SetPaused(true)
+			log.Info("startup power-plan check: High Performance detected, pausing throttling")
+		} else {
+			engine.SetPaused(false)
+		}
+	}
+
 	// Initial throttle sweep — skipped in boost_foreground_only mode.
 	if !cfg.BoostForegroundOnly {
 		count := engine.ThrottleAllUserBackgroundProcesses()
@@ -249,7 +262,9 @@ func cmdRun() {
 
 	// Sync auto-start registry setting with config
 	if cfg.AutoStart {
-		if enabled, err := autostart.IsEnabled(); err == nil && !enabled {
+		if enabled, err := autostart.IsEnabled(); err != nil {
+			log.Warn("failed to query auto-start state", "error", err)
+		} else if !enabled {
 			if err := autostart.Enable(); err != nil {
 				log.Warn("failed to enable auto-start", "error", err)
 			}
@@ -525,19 +540,22 @@ func cmdRun() {
 				}
 			},
 			OnToggleAutoStart: func() {
-				if enabled, err := autostart.IsEnabled(); err == nil {
-					if enabled {
-						if err := autostart.Disable(); err != nil {
-							log.Error("failed to disable auto-start", "error", err)
-						} else {
-							log.Info("auto-start disabled")
-						}
+				enabled, err := autostart.IsEnabled()
+				if err != nil {
+					log.Error("failed to query auto-start state", "error", err)
+					return
+				}
+				if enabled {
+					if err := autostart.Disable(); err != nil {
+						log.Error("failed to disable auto-start", "error", err)
 					} else {
-						if err := autostart.Enable(); err != nil {
-							log.Error("failed to enable auto-start", "error", err)
-						} else {
-							log.Info("auto-start enabled")
-						}
+						log.Info("auto-start disabled")
+					}
+				} else {
+					if err := autostart.Enable(); err != nil {
+						log.Error("failed to enable auto-start", "error", err)
+					} else {
+						log.Info("auto-start enabled")
 					}
 				}
 			},
@@ -865,6 +883,15 @@ func cmdCompanion() {
 	}
 	defer winapi.UnhookWinEvent(hookHandle)
 	log.Info("companion foreground hook installed")
+
+	// Initial foreground snapshot so late companion/service starts do not wait
+	// for the next foreground-change event before boosting the active app.
+	if hwnd := winapi.GetForegroundWindow(); hwnd != 0 {
+		var procID uint32
+		if winapi.GetWindowThreadProcessId(hwnd, &procID) != 0 && procID != 0 {
+			sendPID(procID)
+		}
+	}
 
 	// Keep the process alive by running Windows message loop
 	runtime.LockOSThread()

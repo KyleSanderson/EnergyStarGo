@@ -105,10 +105,6 @@ var (
 	procDestroyMenu         = user32.NewProc("DestroyMenu")
 	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	procGetCursorPos        = user32.NewProc("GetCursorPos")
-	procGetMessageW         = user32.NewProc("GetMessageW")
-	procTranslateMessage    = user32.NewProc("TranslateMessage")
-	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
-	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
 
 	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
 	procDeleteDC           = gdi32.NewProc("DeleteDC")
@@ -491,15 +487,12 @@ func (t *Tray) Run() error {
 	// Message loop
 	var msg MSG
 	for {
-		ret, _, _ := procGetMessageW.Call(
-			uintptr(unsafe.Pointer(&msg)),
-			0, 0, 0,
-		)
-		if int32(ret) <= 0 {
+		got, err := winapi.GetMessage((*winapi.MSG)(unsafe.Pointer(&msg)))
+		if err != nil || !got {
 			break
 		}
-		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+		winapi.TranslateMessage((*winapi.MSG)(unsafe.Pointer(&msg)))
+		winapi.DispatchMessage((*winapi.MSG)(unsafe.Pointer(&msg)))
 	}
 
 	// Clean up.
@@ -633,7 +626,7 @@ func trayWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case WM_DESTROY:
 		procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&t.nid)))
-		procPostQuitMessage.Call(0)
+		winapi.PostQuitMessage(0)
 		return 0
 	}
 

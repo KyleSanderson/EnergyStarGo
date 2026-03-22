@@ -75,15 +75,21 @@ var (
 	procSetProcessAffinityMask       = modkernel32.NewProc("SetProcessAffinityMask")
 	procWTSGetActiveConsoleSessionId = modkernel32.NewProc("WTSGetActiveConsoleSessionId")
 
-	procSetWinEventHook     = moduser32.NewProc("SetWinEventHook")
-	procUnhookWinEvent      = moduser32.NewProc("UnhookWinEvent")
-	procGetMessageW         = moduser32.NewProc("GetMessageW")
-	procTranslateMessage    = moduser32.NewProc("TranslateMessage")
-	procDispatchMessageW    = moduser32.NewProc("DispatchMessageW")
-	procPostQuitMessage     = moduser32.NewProc("PostQuitMessage")
-	procPostThreadMessageW  = moduser32.NewProc("PostThreadMessageW")
-	procGetForegroundWindow = moduser32.NewProc("GetForegroundWindow")
-	procGetWindowTextW      = moduser32.NewProc("GetWindowTextW")
+	procSetWinEventHook          = moduser32.NewProc("SetWinEventHook")
+	procUnhookWinEvent           = moduser32.NewProc("UnhookWinEvent")
+	procGetMessageW              = moduser32.NewProc("GetMessageW")
+	procTranslateMessage         = moduser32.NewProc("TranslateMessage")
+	procDispatchMessageW         = moduser32.NewProc("DispatchMessageW")
+	procPostQuitMessage          = moduser32.NewProc("PostQuitMessage")
+	procPostThreadMessageW       = moduser32.NewProc("PostThreadMessageW")
+	procGetForegroundWindow      = moduser32.NewProc("GetForegroundWindow")
+	procGetWindowTextW           = moduser32.NewProc("GetWindowTextW")
+	procGetWindowThreadProcessId = moduser32.NewProc("GetWindowThreadProcessId")
+	procEnumChildWindows         = moduser32.NewProc("EnumChildWindows")
+	procCreateWindowExW          = moduser32.NewProc("CreateWindowExW")
+	procDefWindowProcW           = moduser32.NewProc("DefWindowProcW")
+	procRegisterClassExW         = moduser32.NewProc("RegisterClassExW")
+	procDestroyWindow            = moduser32.NewProc("DestroyWindow")
 
 	procGetWindowRect     = moduser32.NewProc("GetWindowRect")
 	procMonitorFromWindow = moduser32.NewProc("MonitorFromWindow")
@@ -98,6 +104,11 @@ var (
 	procD3DKMTSetProcessSchedulingPriorityClass = modgdi32.NewProc("D3DKMTSetProcessSchedulingPriorityClass")
 
 	procPowerGetActiveScheme = modpowrprof.NewProc("PowerGetActiveScheme")
+	procSetSuspendState      = modpowrprof.NewProc("SetSuspendState")
+	procGetCurrentThreadId   = modkernel32.NewProc("GetCurrentThreadId")
+	procGetSystemPowerStatus = modkernel32.NewProc("GetSystemPowerStatus")
+	procGetTickCount         = modkernel32.NewProc("GetTickCount")
+	procGetLastInputInfo     = moduser32.NewProc("GetLastInputInfo")
 )
 
 // SetProcessInformation sets process information for the given process handle.
@@ -131,7 +142,7 @@ func CloseHandle(handle windows.Handle) error {
 
 // GetWindowThreadProcessId retrieves the thread and process ID for the specified window.
 func GetWindowThreadProcessId(hwnd uintptr, processID *uint32) uint32 {
-	ret, _, _ := moduser32.NewProc("GetWindowThreadProcessId").Call(
+	ret, _, _ := procGetWindowThreadProcessId.Call(
 		hwnd,
 		uintptr(unsafe.Pointer(processID)),
 	)
@@ -169,7 +180,7 @@ func QueryFullProcessImageName(hProcess windows.Handle) (string, error) {
 
 // EnumChildWindows enumerates the child windows that belong to the specified parent window.
 func EnumChildWindows(hwnd uintptr, callback uintptr) {
-	moduser32.NewProc("EnumChildWindows").Call(
+	procEnumChildWindows.Call(
 		hwnd,
 		callback,
 		0,
@@ -240,8 +251,61 @@ func PostThreadMessage(threadID uint32, msg uint32, wParam, lParam uintptr) erro
 
 // GetCurrentThreadId returns the thread ID of the calling thread.
 func GetCurrentThreadId() uint32 {
-	ret, _, _ := modkernel32.NewProc("GetCurrentThreadId").Call()
+	ret, _, _ := procGetCurrentThreadId.Call()
 	return uint32(ret)
+}
+
+// WNDCLASSEXW mirrors the Win32 WNDCLASSEXW structure.
+type WNDCLASSEXW struct {
+	CbSize        uint32
+	Style         uint32
+	LpfnWndProc   uintptr
+	CbClsExtra    int32
+	CbWndExtra    int32
+	HInstance     uintptr
+	HIcon         uintptr
+	HCursor       uintptr
+	HbrBackground uintptr
+	LpszMenuName  uintptr
+	LpszClassName uintptr
+	HIconSm       uintptr
+}
+
+// RegisterClassEx registers a window class.
+func RegisterClassEx(wc *WNDCLASSEXW) uintptr {
+	ret, _, _ := procRegisterClassExW.Call(uintptr(unsafe.Pointer(wc)))
+	return ret
+}
+
+// CreateWindowEx creates a window with extended style.
+func CreateWindowEx(exStyle uint32, className, windowName uintptr, style uint32, x, y, cx, cy int32, parent, menu, instance, param uintptr) uintptr {
+	ret, _, _ := procCreateWindowExW.Call(
+		uintptr(exStyle),
+		className,
+		windowName,
+		uintptr(style),
+		uintptr(x),
+		uintptr(y),
+		uintptr(cx),
+		uintptr(cy),
+		parent,
+		menu,
+		instance,
+		param,
+	)
+	return ret
+}
+
+// DefWindowProc calls the default window procedure.
+func DefWindowProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
+	ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
+	return ret
+}
+
+// DestroyWindow destroys the specified window.
+func DestroyWindow(hwnd uintptr) bool {
+	ret, _, _ := procDestroyWindow.Call(hwnd)
+	return ret != 0
 }
 
 // SetConsoleCtrlHandler adds or removes an application-defined HandlerRoutine
