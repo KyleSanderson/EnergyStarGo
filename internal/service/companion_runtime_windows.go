@@ -178,7 +178,9 @@ func (c *companionRuntime) ensureCompanionsForSessions(sessionIDs []uint32) {
 }
 
 func (c *companionRuntime) monitorSessions() {
-	ticker := time.NewTicker(15 * time.Second)
+	// SessionChange events drive most lifecycle actions. Keep this as a slow
+	// reconciliation loop to recover from missed events without constant polling.
+	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 
 	for {

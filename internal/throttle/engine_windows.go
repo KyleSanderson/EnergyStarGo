@@ -125,6 +125,11 @@ type Engine struct {
 	// ETW process creation monitoring
 	etwMonitor *etw.ProcessMonitor
 
+	gpuMu             sync.Mutex
+	gpuSupported      bool
+	gpuFailureCount   int
+	gpuDisabledLogged bool
+
 	// Pause state — set via SetPaused; guards throttling operations.
 	pausedMu sync.Mutex
 	paused   bool
@@ -139,6 +144,7 @@ func New(cfg *config.Config, log *logger.Logger) *Engine {
 		originalAffinity: make(map[uint32]uintptr),
 		stopCh:           make(chan struct{}),
 		etwMonitor:       etw.New(log),
+		gpuSupported:     true,
 	}
 }
 
@@ -213,8 +219,12 @@ func (e *Engine) toggleEfficiencyMode(hProcess windows.Handle, processID uint32,
 		if enable {
 			gpuPriority = winapi.D3DKMT_SCHEDULINGPRIORITYCLASS_IDLE
 		}
-		if err := winapi.SetProcessGPUSchedulingPriority(hProcess, uint32(gpuPriority)); err != nil {
-			e.log.Debug("failed to set GPU scheduling priority", "pid", processID, "enable", enable, "error", err)
+		if e.shouldAttemptGPUThrottling() {
+			if err := winapi.SetProcessGPUSchedulingPriority(hProcess, uint32(gpuPriority)); err != nil {
+				e.recordGPUThrottlingFailure(processID, enable, err)
+			} else {
+				e.recordGPUThrottlingSuccess()
+			}
 		}
 	}
 
@@ -249,6 +259,36 @@ func (e *Engine) toggleEfficiencyMode(hProcess windows.Handle, processID uint32,
 	}
 
 	return nil
+}
+
+func (e *Engine) shouldAttemptGPUThrottling() bool {
+	e.gpuMu.Lock()
+	defer e.gpuMu.Unlock()
+	return e.gpuSupported
+}
+
+func (e *Engine) recordGPUThrottlingSuccess() {
+	e.gpuMu.Lock()
+	e.gpuFailureCount = 0
+	e.gpuMu.Unlock()
+}
+
+func (e *Engine) recordGPUThrottlingFailure(processID uint32, enable bool, err error) {
+	e.gpuMu.Lock()
+	defer e.gpuMu.Unlock()
+
+	e.gpuFailureCount++
+	e.log.Debug("failed to set GPU scheduling priority", "pid", processID, "enable", enable, "error", err)
+
+	// If this is repeatedly failing, stop issuing GPU scheduling calls for the
+	// remainder of this run to reduce syscall overhead.
+	if e.gpuFailureCount >= 12 {
+		e.gpuSupported = false
+		if !e.gpuDisabledLogged {
+			e.gpuDisabledLogged = true
+			e.log.Warn("disabling GPU throttling after repeated API failures", "failures", e.gpuFailureCount)
+		}
+	}
 }
 
 // getProcessName returns the executable name for a process handle.
@@ -599,6 +639,9 @@ func (e *Engine) RunMessageLoop() {
 	)
 	if e.hookHandle != 0 {
 		e.log.Info("foreground event hook installed (tray mode)")
+		if hwnd := winapi.GetForegroundWindow(); hwnd != 0 {
+			e.HandleForegroundEvent(hwnd)
+		}
 		defer func() {
 			winapi.UnhookWinEvent(e.hookHandle)
 			e.log.Info("foreground event hook removed")

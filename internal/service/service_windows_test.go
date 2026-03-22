@@ -7,6 +7,10 @@ package service
 
 import (
 	"testing"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
 )
 
 func TestServiceConstants(t *testing.T) {
@@ -45,5 +49,36 @@ func TestQueryStatus_NotInstalled(t *testing.T) {
 		t.Log("Service appears to be installed (or accessible)")
 	} else {
 		t.Logf("QueryStatus returned expected error: %v", err)
+	}
+}
+
+func TestSessionIDFromChangeRequest_NoEventData(t *testing.T) {
+	got := sessionIDFromChangeRequest(svc.ChangeRequest{})
+	if got != noActiveConsoleSession {
+		t.Fatalf("unexpected session id for empty change request: got %d want %d", got, noActiveConsoleSession)
+	}
+}
+
+func TestSessionIDFromChangeRequest_WithNotification(t *testing.T) {
+	n := windows.WTSSESSION_NOTIFICATION{
+		Size:      uint32(unsafe.Sizeof(windows.WTSSESSION_NOTIFICATION{})),
+		SessionID: 42,
+	}
+	req := svc.ChangeRequest{EventData: uintptr(unsafe.Pointer(&n))}
+	got := sessionIDFromChangeRequest(req)
+	if got != 42 {
+		t.Fatalf("unexpected session id: got %d want 42", got)
+	}
+}
+
+func TestSessionIDFromChangeRequest_InvalidNotificationSize(t *testing.T) {
+	n := windows.WTSSESSION_NOTIFICATION{
+		Size:      0,
+		SessionID: 7,
+	}
+	req := svc.ChangeRequest{EventData: uintptr(unsafe.Pointer(&n))}
+	got := sessionIDFromChangeRequest(req)
+	if got != noActiveConsoleSession {
+		t.Fatalf("unexpected session id for invalid notification size: got %d want %d", got, noActiveConsoleSession)
 	}
 }

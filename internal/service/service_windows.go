@@ -9,7 +9,9 @@ package service
 import (
 	"fmt"
 	"time"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
@@ -103,37 +105,42 @@ func (s *EnergyStarService) Execute(args []string, r <-chan svc.ChangeRequest, c
 				}
 				changes <- svc.Status{State: svc.Running, Accepts: acceptedCmds}
 			case svc.SessionChange:
-				// Handle different session change events
-				// WTS_SESSION_LOCK = 7, WTS_SESSION_UNLOCK = 8
-				const (
-					WTS_SESSION_LOCK   = 7
-					WTS_SESSION_UNLOCK = 8
-					WTS_SESSION_LOGON  = 5
-				)
-
-				s.log.Info("service session change received", "event_type", c.EventType)
+				sessionID := sessionIDFromChangeRequest(c)
+				s.log.Info("service session change received", "event_type", c.EventType, "session_id", sessionID)
 
 				// On session lock: immediately switch to aggressive profile
-				if c.EventType == WTS_SESSION_LOCK {
+				if c.EventType == windows.WTS_SESSION_LOCK {
 					s.log.Info("session locked: activating aggressive profile")
 					s.cfg.SetProfile(config.ProfileAggressive)
 					if !s.cfg.BoostForegroundOnly {
 						s.engine.ThrottleAllUserBackgroundProcesses()
 					}
-				} else if c.EventType == WTS_SESSION_UNLOCK {
+				} else if c.EventType == windows.WTS_SESSION_UNLOCK ||
+					c.EventType == windows.WTS_SESSION_LOGON ||
+					c.EventType == windows.WTS_CONSOLE_CONNECT ||
+					c.EventType == windows.WTS_REMOTE_CONNECT ||
+					c.EventType == windows.WTS_SESSION_CREATE {
 					// On unlock: let auto-profile handle it, but trigger a sweep anyway
-					s.log.Info("session unlocked")
 					if s.companion != nil {
-						s.companion.EnsureActiveSessionCompanion()
+						if sessionID != noActiveConsoleSession {
+							s.companion.EnsureSessionCompanion(sessionID)
+						}
+						// Event-first approach: still reconcile once so we don't
+						// miss non-console/RDP edge cases.
+						s.companion.EnsureCompanionsForActiveSessions()
 					}
 					if !s.cfg.BoostForegroundOnly {
 						s.engine.ThrottleAllUserBackgroundProcesses()
 					}
-				} else if c.EventType == WTS_SESSION_LOGON {
-					// On logon: trigger a sweep to catch new user session processes
-					s.log.Info("session logon detected")
+				} else if c.EventType == windows.WTS_SESSION_LOGOFF ||
+					c.EventType == windows.WTS_CONSOLE_DISCONNECT ||
+					c.EventType == windows.WTS_REMOTE_DISCONNECT ||
+					c.EventType == windows.WTS_SESSION_TERMINATE {
+					if s.companion != nil && sessionID != noActiveConsoleSession {
+						s.companion.StopSessionCompanion(sessionID)
+					}
 					if s.companion != nil {
-						s.companion.EnsureActiveSessionCompanion()
+						s.companion.EnsureCompanionsForActiveSessions()
 					}
 					if !s.cfg.BoostForegroundOnly {
 						s.engine.ThrottleAllUserBackgroundProcesses()
@@ -178,6 +185,20 @@ func (s *EnergyStarService) Execute(args []string, r <-chan svc.ChangeRequest, c
 			}
 		}
 	}
+}
+
+func sessionIDFromChangeRequest(c svc.ChangeRequest) uint32 {
+	if c.EventData == 0 {
+		return noActiveConsoleSession
+	}
+	n := (*windows.WTSSESSION_NOTIFICATION)(unsafe.Pointer(c.EventData))
+	if n == nil {
+		return noActiveConsoleSession
+	}
+	if n.Size < uint32(unsafe.Sizeof(windows.WTSSESSION_NOTIFICATION{})) {
+		return noActiveConsoleSession
+	}
+	return n.SessionID
 }
 
 // IsWindowsService detects whether the current process is running as a Windows service.

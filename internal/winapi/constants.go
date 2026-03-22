@@ -86,7 +86,10 @@ const (
 
 // THREAD_INFORMATION_CLASS enum
 const (
-	ThreadPowerThrottling = 1
+	// THREAD_INFORMATION_CLASS value from processthreadsapi.h
+	// (ThreadMemoryPriority=0, ThreadAbsoluteCpuPriority=1,
+	// ThreadDynamicCodePolicy=2, ThreadPowerThrottling=3).
+	ThreadPowerThrottling = 3
 )
 
 // Monitor flags
