@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // SPDX-FileCopyrightText: 2024 Kyle Sanderson
 
+//go:build windows
+
 package winapi
 
 import "golang.org/x/sys/windows"

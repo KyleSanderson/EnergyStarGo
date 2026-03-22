@@ -36,6 +36,7 @@ import (
 
 	"github.com/KyleSanderson/EnergyStarGo/internal/autostart"
 	"github.com/KyleSanderson/EnergyStarGo/internal/config"
+	"github.com/KyleSanderson/EnergyStarGo/internal/foregroundipc"
 	"github.com/KyleSanderson/EnergyStarGo/internal/logger"
 	"github.com/KyleSanderson/EnergyStarGo/internal/power"
 	"github.com/KyleSanderson/EnergyStarGo/internal/scheduler"
@@ -123,6 +124,7 @@ Usage: energystar <command> [flags]
 
 Commands:
   run          Run in foreground (interactive mode)
+  companion    Run foreground companion mode (service IPC helper)
   install      Install as a Windows service
   uninstall    Remove the Windows service
   start        Start the installed service
@@ -730,7 +732,7 @@ func cmdRun() {
 }
 
 // cmdCompanion runs the foreground detection companion in user session.
-// Spawned by service via scheduled task at user logon.
+// Spawned by the service into the active interactive session.
 // Communicates with service via named pipe.
 func cmdCompanion() {
 	// Parse companion-specific flags
@@ -746,7 +748,7 @@ func cmdCompanion() {
 		cfg, _ = config.LoadFromFile(*configPath)
 	}
 	if cfg == nil {
-		cfg = config.NewDefault()
+		cfg = config.DefaultConfig()
 	}
 
 	// Initialize logger (console only for companion, no event log)
@@ -758,15 +760,72 @@ func cmdCompanion() {
 
 	log.Info("EnergyStarGo companion starting")
 
-	// Connect to service pipe (retry with backoff)
-	pipeHandle, err := connectToServicePipe(log)
-	if err != nil {
-		log.Warn("companion: failed to connect to service pipe", "error", err)
-		// Continue anyway - best effort
-	}
-	defer func() {
+	var (
+		pipeMu     sync.Mutex
+		pipeHandle windows.Handle
+		lastPID    uint32
+	)
+
+	connectPipe := func() {
 		if pipeHandle != 0 {
-			windows.CloseHandle(pipeHandle)
+			return
+		}
+		handle, err := connectToServicePipe(log)
+		if err != nil {
+			log.Warn("companion: failed to connect to service pipe", "error", err)
+			return
+		}
+		pipeHandle = handle
+	}
+
+	sendPID := func(procID uint32) {
+		if procID == 0 {
+			return
+		}
+
+		pipeMu.Lock()
+		defer pipeMu.Unlock()
+
+		if procID == lastPID {
+			return
+		}
+
+		if pipeHandle == 0 {
+			connectPipe()
+		}
+		if pipeHandle == 0 {
+			return
+		}
+
+		payload := foregroundipc.EncodePID(procID)
+		var written uint32
+		if err := windows.WriteFile(pipeHandle, payload[:], &written, nil); err != nil || written != uint32(len(payload)) {
+			_ = windows.CloseHandle(pipeHandle)
+			pipeHandle = 0
+			connectPipe()
+			if pipeHandle == 0 {
+				return
+			}
+			written = 0
+			if err := windows.WriteFile(pipeHandle, payload[:], &written, nil); err != nil || written != uint32(len(payload)) {
+				_ = windows.CloseHandle(pipeHandle)
+				pipeHandle = 0
+				return
+			}
+		}
+
+		lastPID = procID
+	}
+
+	pipeMu.Lock()
+	connectPipe()
+	pipeMu.Unlock()
+	defer func() {
+		pipeMu.Lock()
+		defer pipeMu.Unlock()
+		if pipeHandle != 0 {
+			_ = windows.CloseHandle(pipeHandle)
+			pipeHandle = 0
 		}
 	}()
 
@@ -788,17 +847,7 @@ func cmdCompanion() {
 			return 0
 		}
 
-		// Send PID to service via pipe
-		if pipeHandle != 0 {
-			pidBytes := [4]byte{
-				byte(procID),
-				byte(procID >> 8),
-				byte(procID >> 16),
-				byte(procID >> 24),
-			}
-			var written uint32
-			_ = windows.WriteFile(pipeHandle, pidBytes[:], &written, nil)
-		}
+		sendPID(procID)
 		return 0
 	})
 
@@ -840,12 +889,10 @@ func cmdCompanion() {
 
 // connectToServicePipe attempts to connect to the service's named pipe.
 func connectToServicePipe(log *logger.Logger) (windows.Handle, error) {
-	const pipeNameFormat = `\\.\pipe\EnergyStarGo-Foreground`
-
-	// Retry up to 5 times with 100ms backoff (service might not have created pipe yet)
-	for attempt := 0; attempt < 5; attempt++ {
+	// Retry for up to 5 seconds (service pipe may not exist immediately).
+	for attempt := 0; attempt < 20; attempt++ {
 		handle, err := windows.CreateFile(
-			syscall.StringToUTF16Ptr(pipeNameFormat),
+			syscall.StringToUTF16Ptr(foregroundipc.PipeName),
 			windows.GENERIC_WRITE,
 			0,
 			nil,
@@ -854,12 +901,12 @@ func connectToServicePipe(log *logger.Logger) (windows.Handle, error) {
 			0,
 		)
 		if err == nil {
-			log.Debug("connected to service pipe")
+			log.Debug("companion: connected to service pipe")
 			return handle, nil
 		}
 
-		if attempt < 4 {
-			time.Sleep(100 * time.Millisecond)
+		if attempt < 19 {
+			time.Sleep(250 * time.Millisecond)
 		}
 	}
 

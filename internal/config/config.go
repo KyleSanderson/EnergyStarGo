@@ -220,8 +220,10 @@ var AggressiveBypassProcesses = []string{
 	"fontdrvhost.exe",             // Font driver host
 	"shellexperiencehost.exe",     // Shell Experience Host
 	"startmenuexperiencehost.exe", // Start Menu Experience Host
-	"applicationframehost.exe",    // UWP app container host
 	"searchhost.exe",              // Start menu search host
+	"searchui.exe",                // Search UI
+	"searchapp.exe",               // Search app
+	"applicationframehost.exe",    // UWP app container host
 	"notificationhost.exe",        // Windows 11 Action Center & toast notifications
 }
 

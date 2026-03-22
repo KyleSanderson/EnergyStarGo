@@ -95,10 +95,13 @@ type Engine struct {
 	log   *logger.Logger
 	stats Stats
 
-	mu            sync.Mutex
+	mu            sync.RWMutex
 	pendingPID    uint32
 	pendingName   string
 	throttledPIDs map[uint32]string // pid -> process name
+	// originalAffinity stores each process affinity mask before throttling so it
+	// can be restored when the process is boosted again.
+	originalAffinity map[uint32]uintptr
 
 	hookHandle uintptr
 	stopCh     chan struct{}
@@ -130,11 +133,12 @@ type Engine struct {
 // New creates a new throttle engine.
 func New(cfg *config.Config, log *logger.Logger) *Engine {
 	return &Engine{
-		cfg:           cfg,
-		log:           log,
-		throttledPIDs: make(map[uint32]string),
-		stopCh:        make(chan struct{}),
-		etwMonitor:    etw.New(log),
+		cfg:              cfg,
+		log:              log,
+		throttledPIDs:    make(map[uint32]string),
+		originalAffinity: make(map[uint32]uintptr),
+		stopCh:           make(chan struct{}),
+		etwMonitor:       etw.New(log),
 	}
 }
 
@@ -209,12 +213,39 @@ func (e *Engine) toggleEfficiencyMode(hProcess windows.Handle, processID uint32,
 		if enable {
 			gpuPriority = winapi.D3DKMT_SCHEDULINGPRIORITYCLASS_IDLE
 		}
-		_ = winapi.SetProcessGPUSchedulingPriority(hProcess, uint32(gpuPriority))
+		if err := winapi.SetProcessGPUSchedulingPriority(hProcess, uint32(gpuPriority)); err != nil {
+			e.log.Debug("failed to set GPU scheduling priority", "pid", processID, "enable", enable, "error", err)
+		}
 	}
 
-	// Best-effort: pin throttled processes to specific CPU cores when configured
-	if enable && e.cfg.ThrottledAffinityMask != 0 {
-		_ = winapi.SetProcessAffinityMask(hProcess, uintptr(e.cfg.ThrottledAffinityMask))
+	// Best-effort: pin throttled processes to specific CPU cores when configured.
+	// When unthrottling, restore the original affinity if we captured it.
+	if e.cfg.ThrottledAffinityMask != 0 {
+		if enable {
+			e.mu.RLock()
+			_, tracked := e.originalAffinity[processID]
+			e.mu.RUnlock()
+			if !tracked {
+				if mask, _, err := winapi.GetProcessAffinityMask(hProcess); err == nil && mask != 0 {
+					e.mu.Lock()
+					if _, exists := e.originalAffinity[processID]; !exists {
+						e.originalAffinity[processID] = mask
+					}
+					e.mu.Unlock()
+				}
+			}
+			_ = winapi.SetProcessAffinityMask(hProcess, uintptr(e.cfg.ThrottledAffinityMask))
+		} else {
+			e.mu.Lock()
+			originalMask, ok := e.originalAffinity[processID]
+			if ok {
+				delete(e.originalAffinity, processID)
+			}
+			e.mu.Unlock()
+			if ok && originalMask != 0 {
+				_ = winapi.SetProcessAffinityMask(hProcess, originalMask)
+			}
+		}
 	}
 
 	return nil
@@ -240,10 +271,7 @@ func (e *Engine) HandleForegroundEvent(hwnd uintptr) {
 		return
 	}
 
-	hProcess, err := winapi.OpenProcess(
-		winapi.PROCESS_QUERY_LIMITED_INFORMATION|winapi.PROCESS_SET_INFORMATION,
-		false, procID,
-	)
+	hProcess, err := winapi.OpenProcess(winapi.PROCESS_STATE_CHANGE_ACCESS, false, procID)
 	if err != nil {
 		return
 	}
@@ -253,9 +281,6 @@ func (e *Engine) HandleForegroundEvent(hwnd uintptr) {
 	if appName == "" {
 		return
 	}
-
-	e.stats.IncrementForeground()
-	e.log.ForegroundChange(appName, procID)
 
 	// UWP special handling: find the actual child process
 	if strings.EqualFold(appName, uwpFrameHostApp) {
@@ -273,41 +298,77 @@ func (e *Engine) HandleForegroundEvent(hwnd uintptr) {
 		}
 	}
 
+	e.handleForegroundProcess(hProcess, procID, appName)
+}
+
+// HandleForegroundPID applies the same foreground transition logic used by
+// HWND-based events, but keyed directly by process ID (used by service IPC).
+func (e *Engine) HandleForegroundPID(procID uint32) {
+	if e.IsPaused() || procID == 0 {
+		return
+	}
+
+	hProcess, err := winapi.OpenProcess(winapi.PROCESS_STATE_CHANGE_ACCESS, false, procID)
+	if err != nil {
+		return
+	}
+	defer winapi.CloseHandle(hProcess)
+
+	appName := e.getProcessName(hProcess)
+	if appName == "" {
+		return
+	}
+
+	e.handleForegroundProcess(hProcess, procID, appName)
+}
+
+func (e *Engine) handleForegroundProcess(hProcess windows.Handle, procID uint32, appName string) {
+	e.stats.IncrementForeground()
+	e.log.ForegroundChange(appName, procID)
+
+	var (
+		shouldBoost bool
+		prevPID     uint32
+		prevName    string
+	)
+
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	bypass := e.cfg.ShouldBypass(appName)
-
 	if !bypass {
-		// Boost the foreground process
+		shouldBoost = true
+		e.stats.SetForeground(appName, procID)
+		delete(e.throttledPIDs, procID)
+	}
+	if e.pendingPID != 0 && e.pendingPID != procID {
+		prevPID = e.pendingPID
+		prevName = e.pendingName
+	}
+	if !bypass {
+		e.pendingPID = procID
+		e.pendingName = appName
+	}
+	e.mu.Unlock()
+
+	if shouldBoost {
 		if err := e.toggleEfficiencyMode(hProcess, procID, false); err == nil {
 			e.log.Boost(appName, procID)
 			e.stats.IncrementBoosted()
 		}
-		e.stats.SetForeground(appName, procID)
-
-		// Remove from throttled set
-		delete(e.throttledPIDs, procID)
 	}
 
-	// Throttle the previous foreground process
-	if e.pendingPID != 0 && e.pendingPID != procID {
-		prevHandle, err := winapi.OpenProcess(
-			winapi.PROCESS_SET_INFORMATION, false, e.pendingPID,
-		)
-		if err == nil {
-			if err := e.toggleEfficiencyMode(prevHandle, e.pendingPID, true); err == nil {
-				e.log.Throttle(e.pendingName, e.pendingPID)
-				e.stats.IncrementThrottled()
-				e.throttledPIDs[e.pendingPID] = e.pendingName
-			}
-			winapi.CloseHandle(prevHandle)
+	if prevPID != 0 {
+		prevHandle, err := winapi.OpenProcess(winapi.PROCESS_STATE_CHANGE_ACCESS, false, prevPID)
+		if err != nil {
+			return
 		}
-	}
-
-	if !bypass {
-		e.pendingPID = procID
-		e.pendingName = appName
+		if err := e.toggleEfficiencyMode(prevHandle, prevPID, true); err == nil {
+			e.log.Throttle(prevName, prevPID)
+			e.stats.IncrementThrottled()
+			e.mu.Lock()
+			e.throttledPIDs[prevPID] = prevName
+			e.mu.Unlock()
+		}
+		winapi.CloseHandle(prevHandle)
 	}
 }
 
@@ -339,7 +400,7 @@ func (e *Engine) resolveUWPProcess(hwnd uintptr, parentHandle windows.Handle, pa
 		}
 
 		childHandle, err := winapi.OpenProcess(
-			winapi.PROCESS_QUERY_LIMITED_INFORMATION|winapi.PROCESS_SET_INFORMATION,
+			winapi.PROCESS_STATE_CHANGE_ACCESS,
 			false, childPID,
 		)
 		if err != nil {
@@ -384,9 +445,9 @@ func (e *Engine) ThrottleAllUserBackgroundProcesses() int {
 		return 0
 	}
 
-	e.mu.Lock()
+	e.mu.RLock()
 	pendingPID := e.pendingPID
-	e.mu.Unlock()
+	e.mu.RUnlock()
 
 	count := 0
 	// Determine if running as a service account (SYSTEM, LOCAL SERVICE, NETWORK SERVICE, or MSA)
@@ -478,6 +539,7 @@ func (e *Engine) RestoreAllProcesses() int {
 
 	e.mu.Lock()
 	e.throttledPIDs = make(map[uint32]string)
+	e.originalAffinity = make(map[uint32]uintptr)
 	e.mu.Unlock()
 
 	e.log.Info("restored all processes", "count", count)
@@ -633,10 +695,9 @@ func (e *Engine) handlePowerBroadcast(wParam uintptr, lParam uintptr) uintptr {
 		return 0
 	}
 
-	pbs := (*winapi.POWERBROADCAST_SETTING)(unsafe.Pointer(lParam))
-	if pbs == nil {
-		return 0
-	}
+	var pbs winapi.POWERBROADCAST_SETTING
+	winapi.CopyFromUintptr(unsafe.Pointer(&pbs), lParam, uintptr(unsafe.Sizeof(pbs)))
+	dataAddr := lParam + unsafe.Offsetof(winapi.POWERBROADCAST_SETTING{}.Data)
 
 	// Convert PowerSetting bytes to GUID for comparison
 	var settingGUID [16]byte
@@ -646,7 +707,9 @@ func (e *Engine) handlePowerBroadcast(wParam uintptr, lParam uintptr) uintptr {
 	// AC/DC power source change detected
 	if guid == winapi.GUID_ACDC_POWER_SOURCE {
 		if pbs.DataLength >= 1 {
-			onAC := pbs.Data[0] == 0
+			var source [1]byte
+			winapi.CopyFromUintptr(unsafe.Pointer(&source[0]), dataAddr, 1)
+			onAC := source[0] == 0
 			state := "battery"
 			if onAC {
 				state = "AC"
@@ -675,7 +738,9 @@ func (e *Engine) handlePowerBroadcast(wParam uintptr, lParam uintptr) uintptr {
 	// Battery percentage change
 	if guid == winapi.GUID_BATTERY_PERCENTAGE_REMAINING {
 		if pbs.DataLength >= 1 {
-			battPercent := uint32(pbs.Data[0])
+			var percent [1]byte
+			winapi.CopyFromUintptr(unsafe.Pointer(&percent[0]), dataAddr, 1)
+			battPercent := uint32(percent[0])
 			e.log.Debug("battery percentage changed", "percent", battPercent)
 
 			// Check if battery is low
@@ -700,7 +765,7 @@ func (e *Engine) handlePowerBroadcast(wParam uintptr, lParam uintptr) uintptr {
 			if copyLen > 16 {
 				copyLen = 16
 			}
-			copy(planGUID[:copyLen], pbs.Data[:copyLen])
+			winapi.CopyFromUintptr(unsafe.Pointer(&planGUID[0]), dataAddr, uintptr(copyLen))
 			planGUIDStruct := guidFromBytes(planGUID)
 
 			if planGUIDStruct == winapi.GUID_POWER_PLAN_HIGH_PERFORMANCE {
@@ -720,8 +785,8 @@ func (e *Engine) handlePowerBroadcast(wParam uintptr, lParam uintptr) uintptr {
 	// Display state change (screen on/off)
 	if guid == winapi.GUID_CONSOLE_DISPLAY_STATE {
 		if pbs.DataLength >= 4 {
-			// Safely read 4-byte state value using pointer conversion
-			bytes := (*[4]byte)(unsafe.Pointer(&pbs.Data[0]))
+			var bytes [4]byte
+			winapi.CopyFromUintptr(unsafe.Pointer(&bytes[0]), dataAddr, 4)
 			state := uint32(bytes[0]) | uint32(bytes[1])<<8 | uint32(bytes[2])<<16 | uint32(bytes[3])<<24
 			displayOn := state != winapi.DISPLAY_OFF
 			if !displayOn && e.cfg.ThrottleOnDisplayOff {
@@ -831,15 +896,15 @@ func (e *Engine) Stop() {
 
 // ThrottledCount returns the number of currently throttled processes.
 func (e *Engine) ThrottledCount() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return len(e.throttledPIDs)
 }
 
 // ThrottledProcesses returns a copy of the currently throttled process map.
 func (e *Engine) ThrottledProcesses() map[uint32]string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	result := make(map[uint32]string, len(e.throttledPIDs))
 	for k, v := range e.throttledPIDs {
 		result[k] = v

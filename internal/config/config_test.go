@@ -298,11 +298,29 @@ func TestDefaultBypassProcessList(t *testing.T) {
 		seen[p] = true
 	}
 
+	// Verify no duplicates in aggressive list
+	seenAggressive := make(map[string]bool)
+	for _, p := range AggressiveBypassProcesses {
+		if seenAggressive[p] {
+			t.Errorf("duplicate in AggressiveBypassProcesses: %s", p)
+		}
+		seenAggressive[p] = true
+	}
+
 	// Verify all entries are lowercase (ShouldBypass lowercases, but entries should be canonical)
 	for _, p := range BalancedBypassProcesses {
 		for _, c := range p {
 			if c >= 'A' && c <= 'Z' {
 				t.Errorf("BalancedBypassProcesses entry should be lowercase: %s", p)
+				break
+			}
+		}
+	}
+
+	for _, p := range AggressiveBypassProcesses {
+		for _, c := range p {
+			if c >= 'A' && c <= 'Z' {
+				t.Errorf("AggressiveBypassProcesses entry should be lowercase: %s", p)
 				break
 			}
 		}

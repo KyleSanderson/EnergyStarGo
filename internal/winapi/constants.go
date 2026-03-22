@@ -15,6 +15,9 @@ const (
 	PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 	PROCESS_ALL_ACCESS                = 0x001F0FFF
 	SYNCHRONIZE                       = 0x00100000
+	// PROCESS_STATE_CHANGE_ACCESS is used for boost/throttle transitions where
+	// both querying process metadata and setting process/thread state are needed.
+	PROCESS_STATE_CHANGE_ACCESS = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION
 )
 
 // PROCESS_INFORMATION_CLASS enum

@@ -71,6 +71,7 @@ var (
 	procRtlMoveMemory                = modkernel32.NewProc("RtlMoveMemory")
 	procGlobalMemoryStatusEx         = modkernel32.NewProc("GlobalMemoryStatusEx")
 	procGetTickCount64               = modkernel32.NewProc("GetTickCount64")
+	procGetProcessAffinityMask       = modkernel32.NewProc("GetProcessAffinityMask")
 	procSetProcessAffinityMask       = modkernel32.NewProc("SetProcessAffinityMask")
 	procWTSGetActiveConsoleSessionId = modkernel32.NewProc("WTSGetActiveConsoleSessionId")
 
@@ -451,7 +452,10 @@ func SetProcessGPUSchedulingPriority(hProcess windows.Handle, priority uint32) e
 		uintptr(priority),
 	)
 	if r1 != 0 {
-		return err
+		if err != windows.ERROR_SUCCESS {
+			return fmt.Errorf("D3DKMTSetProcessSchedulingPriorityClass NTSTATUS=0x%08x: %w", uint32(r1), err)
+		}
+		return fmt.Errorf("D3DKMTSetProcessSchedulingPriorityClass NTSTATUS=0x%08x", uint32(r1))
 	}
 	return nil
 }
@@ -463,6 +467,21 @@ func SetProcessAffinityMask(hProcess windows.Handle, mask uintptr) error {
 		return err
 	}
 	return nil
+}
+
+// GetProcessAffinityMask retrieves the process and system affinity masks.
+func GetProcessAffinityMask(hProcess windows.Handle) (uintptr, uintptr, error) {
+	var processMask uintptr
+	var systemMask uintptr
+	ret, _, err := procGetProcessAffinityMask.Call(
+		uintptr(hProcess),
+		uintptr(unsafe.Pointer(&processMask)),
+		uintptr(unsafe.Pointer(&systemMask)),
+	)
+	if ret == 0 {
+		return 0, 0, err
+	}
+	return processMask, systemMask, nil
 }
 
 // Well-known Windows power plan GUIDs.

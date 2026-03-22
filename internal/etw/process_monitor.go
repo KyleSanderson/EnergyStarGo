@@ -196,7 +196,8 @@ func ProcessETWEvent(event *winapi.EVENT_TRACE) uint32 {
 	}
 
 	// Read first 4 bytes as DWORD (PID)
-	pidBytes := (*[4]byte)(unsafe.Pointer(event.MofData))
+	var pidBytes [4]byte
+	winapi.CopyFromUintptr(unsafe.Pointer(&pidBytes[0]), event.MofData, 4)
 	pid := uint32(pidBytes[0]) | uint32(pidBytes[1])<<8 |
 		uint32(pidBytes[2])<<16 | uint32(pidBytes[3])<<24
 

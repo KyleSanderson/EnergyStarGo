@@ -8,12 +8,8 @@ package service
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
-	"unsafe"
 
-	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
@@ -28,9 +24,10 @@ const ServiceDescription = "Automatically throttles background processes using W
 
 // EnergyStarService implements svc.Handler.
 type EnergyStarService struct {
-	cfg    *config.Config
-	log    *logger.Logger
-	engine *throttle.Engine
+	cfg       *config.Config
+	log       *logger.Logger
+	engine    *throttle.Engine
+	companion *companionRuntime
 }
 
 // NewService creates a new service handler.
@@ -57,9 +54,8 @@ func (s *EnergyStarService) Execute(args []string, r <-chan svc.ChangeRequest, c
 	}
 
 	// Start housekeeping in background
-	hkDone := make(chan struct{})
+	hkStop := make(chan struct{})
 	go func() {
-		defer close(hkDone)
 		if s.cfg.BoostForegroundOnly {
 			return // no periodic sweeping in boost_foreground_only mode
 		}
@@ -69,21 +65,29 @@ func (s *EnergyStarService) Execute(args []string, r <-chan svc.ChangeRequest, c
 			select {
 			case <-ticker.C:
 				s.engine.ThrottleAllUserBackgroundProcesses()
-			case <-hkDone:
+			case <-hkStop:
 				return
 			}
 		}
 	}()
 
 	// Start message loop in background (requires own OS thread)
-	msgDone := make(chan struct{})
 	go func() {
-		defer close(msgDone)
 		s.engine.RunMessageLoop()
 	}()
 
 	changes <- svc.Status{State: svc.Running, Accepts: acceptedCmds}
 	s.log.Info("service started")
+
+	// Start service-mode companion runtime (CreateProcessAsUser + named pipe IPC).
+	// Best effort: service remains functional if companion startup fails.
+	companion, err := newCompanionRuntime(s.log, s.engine, args)
+	if err != nil {
+		s.log.Warn("failed to initialize companion runtime", "error", err)
+	} else {
+		s.companion = companion
+		s.companion.Start()
+	}
 
 	paused := false
 	for {
@@ -119,12 +123,18 @@ func (s *EnergyStarService) Execute(args []string, r <-chan svc.ChangeRequest, c
 				} else if c.EventType == WTS_SESSION_UNLOCK {
 					// On unlock: let auto-profile handle it, but trigger a sweep anyway
 					s.log.Info("session unlocked")
+					if s.companion != nil {
+						s.companion.EnsureActiveSessionCompanion()
+					}
 					if !s.cfg.BoostForegroundOnly {
 						s.engine.ThrottleAllUserBackgroundProcesses()
 					}
 				} else if c.EventType == WTS_SESSION_LOGON {
 					// On logon: trigger a sweep to catch new user session processes
 					s.log.Info("session logon detected")
+					if s.companion != nil {
+						s.companion.EnsureActiveSessionCompanion()
+					}
 					if !s.cfg.BoostForegroundOnly {
 						s.engine.ThrottleAllUserBackgroundProcesses()
 					}
@@ -139,6 +149,10 @@ func (s *EnergyStarService) Execute(args []string, r <-chan svc.ChangeRequest, c
 			case svc.Stop, svc.Shutdown:
 				s.log.Info("service stop requested")
 				changes <- svc.Status{State: svc.StopPending}
+				close(hkStop)
+				if s.companion != nil {
+					s.companion.Stop()
+				}
 				s.engine.Stop()
 				if s.cfg.RestoreOnExit {
 					s.engine.RestoreAllProcesses()
@@ -217,50 +231,6 @@ func Install(exePath string, args []string) error {
 	if err := s.SetRecoveryActions(recoveryActions, 86400); err != nil {
 		// Non-fatal: service is created, just no recovery
 		_ = err
-	}
-
-	// Create scheduled task for companion app to run at user logon
-	// Best-effort: if it fails, service still works without companion
-	if err := createCompanionScheduledTask(exePath, args); err != nil {
-		// Don't fail the service installation, just log it
-		fmt.Printf("Warning: failed to create companion scheduled task: %v\n", err)
-	}
-
-	return nil
-}
-
-// createCompanionScheduledTask creates a scheduled task to run companion at user logon.
-// Runs the same energystar.exe with "companion" argument.
-func createCompanionScheduledTask(exePath string, serviceArgs []string) error {
-	// Prepare command line: energystar.exe companion (plus any service config args)
-	cmdLine := fmt.Sprintf(`"%s" companion`, exePath)
-	
-	// If service has config path arg, pass it to companion too
-	for i := 0; i < len(serviceArgs)-1; i++ {
-		if serviceArgs[i] == "--config" {
-			cmdLine += fmt.Sprintf(` --config "%s"`, serviceArgs[i+1])
-			break
-		}
-	}
-
-	// Use Windows Task Scheduler COM API
-	// This is a simple approach using osascript-style registry manipulation
-	// For complex scheduled tasks, would use Task Scheduler COM (go-ole)
-	// For now, use registry to create a simple RunOnce entry (doesn't repeat, but sufficient for per-logon)
-	
-	// Alternative: Use RunOnce in HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\RunOnce
-	// This runs once per logon automatically
-	
-	hkey, err := registry.OpenKey(registry.LOCAL_MACHINE,
-		`Software\Microsoft\Windows\CurrentVersion\RunOnce`, registry.SET_VALUE)
-	if err != nil {
-		return fmt.Errorf("failed to open RunOnce registry key: %w", err)
-	}
-	defer hkey.Close()
-
-	errs := hkey.SetStringValue("EnergyStarGo-Companion", cmdLine)
-	if errs != nil {
-		return fmt.Errorf("failed to set RunOnce registry value: %w", errs)
 	}
 
 	return nil
