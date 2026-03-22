@@ -406,7 +406,7 @@ internal/
 The following processes are never throttled:
 
 - **System critical**: `csrss.exe`, `smss.exe`, `svchost.exe`, `dwm.exe`, `lsass.exe`, `services.exe`, `wininit.exe`, `winlogon.exe`
-- **Shell**: `explorer.exe`, `sihost.exe`, `SearchHost.exe`, `StartMenuExperienceHost.exe`, `ShellExperienceHost.exe`
+- **Shell**: `explorer.exe`, `sihost.exe`, `SearchHost.exe`, `SearchUI.exe`, `SearchApp.exe`, `StartMenuExperienceHost.exe`, `ShellExperienceHost.exe`
 - **Input**: `ctfmon.exe`, `ChsIME.exe`, `TextInputHost.exe`
 - **Audio**: `audiodg.exe`
 - **Security**: `MsMpEng.exe`, `SecurityHealthService.exe`

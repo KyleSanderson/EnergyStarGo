@@ -222,8 +222,7 @@ var AggressiveBypassProcesses = []string{
 	"startmenuexperiencehost.exe", // Start Menu Experience Host
 	"applicationframehost.exe",    // UWP app container host
 	"searchhost.exe",              // Start menu search host
-	"searchui.exe",                // Windows 10 search UI host
-	"searchapp.exe",               // Windows 11 search app host
+	"notificationhost.exe",        // Windows 11 Action Center & toast notifications
 }
 
 // bypassListForProfile returns the built-in bypass list for the given profile.

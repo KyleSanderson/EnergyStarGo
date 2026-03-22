@@ -89,6 +89,8 @@ func main() {
 	switch command {
 	case "run":
 		cmdRun()
+	case "companion":
+		cmdCompanion()
 	case "install":
 		cmdInstall()
 	case "uninstall":
@@ -276,79 +278,8 @@ func cmdRun() {
 			log.Info("auto-profile: on AC", "profile", string(onAC))
 		}
 
-		// Poll power state every 30s and switch profile when AC/battery changes
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			wasOnBattery := power.IsOnBattery()
-			for {
-				select {
-				case <-ticker.C:
-					onBat := power.IsOnBattery()
-					if onBat != wasOnBattery {
-						wasOnBattery = onBat
-						if onBat {
-							cfg.SetProfile(onBattery)
-							log.Info("auto-profile: switched to battery mode", "profile", string(onBattery))
-							if cfg.BatteryNotifications && trayIcon != nil {
-								trayIcon.ShowNotification("EnergyStarGo", "Switched to aggressive profile (on battery)")
-							}
-						} else {
-							cfg.SetProfile(onAC)
-							log.Info("auto-profile: switched to AC mode", "profile", string(onAC))
-							if cfg.BatteryNotifications && trayIcon != nil {
-								trayIcon.ShowNotification("EnergyStarGo", "Switched to balanced profile (on AC)")
-							}
-						}
-					}
-				case <-stopHK:
-					return
-				}
-			}
-		}()
-	}
-
-	// ── Low-battery auto-suspend ─────────────────────────────────────────────
-	if cfg.LowBatterySuspendPercent > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(60 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					st, err := power.GetStatus()
-					if err != nil {
-						continue
-					}
-					if st.ACStatus == power.ACOnline {
-						continue // don't suspend when on AC
-					}
-					if st.BatteryPercent == 255 {
-						continue // no battery
-					}
-					if int(st.BatteryPercent) > cfg.LowBatterySuspendPercent {
-						continue // battery level is fine
-					}
-					idleMin := int(power.IdleSeconds()) / 60
-					if cfg.IdleSuspendMinutes > 0 && idleMin < cfg.IdleSuspendMinutes {
-						continue // not idle long enough
-					}
-					log.Warn("battery low, suspending system",
-						"battery_percent", st.BatteryPercent,
-						"threshold", cfg.LowBatterySuspendPercent)
-					if cfg.BatteryNotifications && trayIcon != nil {
-						trayIcon.ShowNotification("EnergyStarGo", fmt.Sprintf("Battery at %d%%, suspending...", st.BatteryPercent))
-					}
-					_ = power.Suspend(false, false)
-				case <-stopHK:
-					return
-				}
-			}
-		}()
+		// Power state changes are now handled by event-driven notifications from the engine
+		// No polling timer needed
 	}
 
 	// ── Idle-time adaptive throttling ───────────────────────────────────────
@@ -379,42 +310,6 @@ func cmdRun() {
 						cfg.SetProfile(savedProfile)
 						log.Info("idle-throttle: user active, restoring profile",
 							"profile", string(savedProfile))
-					}
-				case <-stopHK:
-					return
-				}
-			}
-		}()
-	}
-
-	// ── Power plan integration ───────────────────────────────────────────────
-	if cfg.RespectPowerPlan {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(60 * time.Second)
-			defer ticker.Stop()
-			var pausedByPlan bool
-			for {
-				select {
-				case <-ticker.C:
-					guid, err := winapi.GetActivePowerScheme()
-					if err != nil {
-						log.Debug("power-plan: failed to query active scheme", "error", err)
-						continue
-					}
-					isHighPerf := guid == winapi.GUID_POWER_PLAN_HIGH_PERFORMANCE
-					if isHighPerf && !pausedByPlan {
-						pausedByPlan = true
-						engine.SetPaused(true)
-						log.Info("power-plan: High Performance detected, pausing throttling")
-					} else if !isHighPerf && pausedByPlan {
-						pausedByPlan = false
-						engine.SetPaused(false)
-						log.Info("power-plan: no longer High Performance, resuming throttling")
-						if !cfg.BoostForegroundOnly {
-							engine.ThrottleAllUserBackgroundProcesses()
-						}
 					}
 				case <-stopHK:
 					return
@@ -832,6 +727,143 @@ func cmdRun() {
 	}
 	wg.Wait()
 	log.Info("EnergyStarGo stopped")
+}
+
+// cmdCompanion runs the foreground detection companion in user session.
+// Spawned by service via scheduled task at user logon.
+// Communicates with service via named pipe.
+func cmdCompanion() {
+	// Parse companion-specific flags
+	fs := flag.NewFlagSet("companion", flag.ContinueOnError)
+	configPath := fs.String("config", "", "Path to configuration file")
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		os.Exit(1)
+	}
+
+	// Load configuration
+	var cfg *config.Config
+	if *configPath != "" {
+		cfg, _ = config.LoadFromFile(*configPath)
+	}
+	if cfg == nil {
+		cfg = config.NewDefault()
+	}
+
+	// Initialize logger (console only for companion, no event log)
+	log, err := logger.New("", "info")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	log.Info("EnergyStarGo companion starting")
+
+	// Connect to service pipe (retry with backoff)
+	pipeHandle, err := connectToServicePipe(log)
+	if err != nil {
+		log.Warn("companion: failed to connect to service pipe", "error", err)
+		// Continue anyway - best effort
+	}
+	defer func() {
+		if pipeHandle != 0 {
+			windows.CloseHandle(pipeHandle)
+		}
+	}()
+
+	// Install foreground window hook
+	callback := syscall.NewCallback(func(
+		hWinEventHook uintptr,
+		event uint32,
+		hwnd uintptr,
+		idObject int32,
+		idChild int32,
+		dwEventThread uint32,
+		dwmsEventTime uint32,
+	) uintptr {
+		if hwnd == 0 {
+			return 0
+		}
+		var procID uint32
+		if winapi.GetWindowThreadProcessId(hwnd, &procID) == 0 || procID == 0 {
+			return 0
+		}
+
+		// Send PID to service via pipe
+		if pipeHandle != 0 {
+			pidBytes := [4]byte{
+				byte(procID),
+				byte(procID >> 8),
+				byte(procID >> 16),
+				byte(procID >> 24),
+			}
+			var written uint32
+			_ = windows.WriteFile(pipeHandle, pidBytes[:], &written, nil)
+		}
+		return 0
+	})
+
+	hookHandle := winapi.SetWinEventHook(
+		winapi.EVENT_SYSTEM_FOREGROUND,
+		winapi.EVENT_SYSTEM_FOREGROUND,
+		0,
+		callback,
+		0, 0,
+		winapi.WINEVENT_OUTOFCONTEXT,
+	)
+	if hookHandle == 0 {
+		log.Error("failed to install foreground hook")
+		os.Exit(1)
+	}
+	defer winapi.UnhookWinEvent(hookHandle)
+	log.Info("companion foreground hook installed")
+
+	// Keep the process alive by running Windows message loop
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	var msg winapi.MSG
+	for {
+		got, err := winapi.GetMessage(&msg)
+		if err != nil {
+			log.Error("GetMessage failed", "error", err)
+			break
+		}
+		if !got { // WM_QUIT
+			break
+		}
+		winapi.TranslateMessage(&msg)
+		winapi.DispatchMessage(&msg)
+	}
+
+	log.Info("companion stopped")
+}
+
+// connectToServicePipe attempts to connect to the service's named pipe.
+func connectToServicePipe(log *logger.Logger) (windows.Handle, error) {
+	const pipeNameFormat = `\\.\pipe\EnergyStarGo-Foreground`
+
+	// Retry up to 5 times with 100ms backoff (service might not have created pipe yet)
+	for attempt := 0; attempt < 5; attempt++ {
+		handle, err := windows.CreateFile(
+			syscall.StringToUTF16Ptr(pipeNameFormat),
+			windows.GENERIC_WRITE,
+			0,
+			nil,
+			windows.OPEN_EXISTING,
+			0,
+			0,
+		)
+		if err == nil {
+			log.Debug("connected to service pipe")
+			return handle, nil
+		}
+
+		if attempt < 4 {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	return 0, fmt.Errorf("failed to connect to service pipe after retries")
 }
 
 func cmdInstall() {
